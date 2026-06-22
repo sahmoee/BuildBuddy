@@ -259,7 +259,14 @@ final class Store: ObservableObject {
 
     var selected: Project? { projects.first { $0.id == selectionID } }
 
-    func append(_ s: String) { console += s }
+    func append(_ s: String) {
+        console += s
+        // FREEZE FIX (memory/render): keep the console bounded so SwiftUI never rebuilds an
+        // unbounded Text. Trim to the last ~120k characters when it grows past ~160k.
+        if console.count > 160_000 {
+            console = "…(earlier output trimmed)…\n" + String(console.suffix(120_000))
+        }
+    }
     func line(_ s: String)   { console += "\n\(s)\n" }
     func clearConsole()      { console = "" }
 
@@ -406,18 +413,37 @@ final class Store: ObservableObject {
                 let handle = pipe.fileHandleForReading
                 var full = Data()
                 let lock = NSLock()
+
+                // FREEZE FIX (flooding): a command like unzipping a large delivery emits
+                // hundreds of lines. Hopping to @MainActor per chunk spawned hundreds of
+                // tasks and forced a full console re-render each time, choking the UI.
+                // Instead we buffer output and flush at most ~8x/second.
+                var pending = ""
+                let pendingLock = NSLock()
+                let flushTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+                flushTimer.schedule(deadline: .now() + 0.12, repeating: 0.12)
+                flushTimer.setEventHandler {
+                    pendingLock.lock()
+                    let chunk = pending; pending = ""
+                    pendingLock.unlock()
+                    guard !chunk.isEmpty else { return }
+                    Task { @MainActor in self.append(chunk) }
+                }
+                flushTimer.resume()
+
                 handle.readabilityHandler = { h in
                     let d = h.availableData
                     guard !d.isEmpty else { return }
                     lock.lock(); full.append(d); lock.unlock()
                     if let s = String(data: d, encoding: .utf8) {
-                        Task { @MainActor in self.append(s) }
+                        pendingLock.lock(); pending += s; pendingLock.unlock()
                     }
                 }
                 do {
                     try p.run()
                     setpgid(p.processIdentifier, p.processIdentifier)  // detach into its own group
                 } catch {
+                    flushTimer.cancel()
                     Task { @MainActor in self.line("⚠️ \(error.localizedDescription)") }
                     cont.resume(returning: ShellResult(code: -1, out: error.localizedDescription)); return
                 }
@@ -439,6 +465,10 @@ final class Store: ObservableObject {
                 p.waitUntilExit()
                 watchdog.cancel()
                 handle.readabilityHandler = nil
+                flushTimer.cancel()
+                // Final flush of anything still buffered.
+                pendingLock.lock(); let tail = pending; pending = ""; pendingLock.unlock()
+                if !tail.isEmpty { Task { @MainActor in self.append(tail) } }
                 lock.lock(); let out = String(data: full, encoding: .utf8) ?? ""; lock.unlock()
                 let code = timedOut ? Int32(124) : p.terminationStatus  // 124 == timeout, like GNU
                 cont.resume(returning: ShellResult(code: code, out: out))
@@ -588,7 +618,8 @@ final class Store: ObservableObject {
 
     func previewDelivery(zip: URL) async -> DeliveryPreview? {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("bb_\(UUID().uuidString)")
-        let unzip = await run("mkdir -p \(Sh.q(tmp.path)) && /usr/bin/unzip -o \(Sh.q(zip.path)) -d \(Sh.q(tmp.path))",
+        // -q (quiet) so a large delivery does not print one line per file (flooding the console).
+        let unzip = await run("mkdir -p \(Sh.q(tmp.path)) && /usr/bin/unzip -oq \(Sh.q(zip.path)) -d \(Sh.q(tmp.path))",
                               cwd: nil, label: "Unzip (preview)")
         if unzip.code != 0 { line("Unzip failed."); return nil }
         let inner = syncShell("find \(Sh.q(tmp.path)) -mindepth 1 -maxdepth 1 -type d | head -n1", cwd: nil).out
