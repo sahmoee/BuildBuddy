@@ -495,13 +495,23 @@ final class Store: ObservableObject {
 
     func refresh() async {
         guard let p = selected else { return }
-        let b = syncShell("git rev-parse --abbrev-ref HEAD", cwd: p.url).out
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        branch = b.isEmpty ? "(no git)" : b
+        // Guard against the working-directory/permission error becoming the "branch name":
+        // only accept the output if the command succeeded AND looks like a real branch.
+        let res = syncShell("git rev-parse --abbrev-ref HEAD", cwd: p.url)
+        let b = res.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        let looksValid = res.code == 0 && !b.isEmpty && !b.contains(" ") && !b.lowercased().contains("fatal")
+        if looksValid {
+            branch = b
+        } else if b.lowercased().contains("operation not permitted") {
+            branch = "(no access)"
+            line("⚠️ macOS blocked access to this folder. Grant Files & Folders permission to BuildBuddy in System Settings → Privacy & Security, then click Refresh.")
+        } else {
+            branch = "(no git)"
+        }
         let raw = syncShell("git branch -a --format='%(refname:short)'", cwd: p.url).out
         branches = raw.split(separator: "\n").map { String($0) }
             .map { $0.replacingOccurrences(of: "origin/", with: "") }
-            .filter { !$0.contains("HEAD") }
+            .filter { !$0.contains("HEAD") && !$0.lowercased().contains("fatal") }
         branches = Array(Set(branches)).sorted()
         let st = syncShell("git status --porcelain", cwd: p.url).out
         statusLine = st.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "clean" : "uncommitted changes"
@@ -509,6 +519,11 @@ final class Store: ObservableObject {
 
     func pull() async {
         guard let p = selected else { return }
+        let branchOK = !branch.isEmpty && !branch.hasPrefix("(") && !branch.contains(" ")
+        guard branchOK else {
+            line("⚠️ Skipping pull — no valid branch detected (\(branch)). Click Refresh first.")
+            return
+        }
         _ = await run("git pull --ff-only origin \(Sh.q(branch)) || git pull --no-edit origin \(Sh.q(branch))",
                       cwd: p.url, label: "Pull")
         await refresh()
@@ -526,14 +541,28 @@ final class Store: ObservableObject {
             lastResult = "❌ Commit blocked (unsafe message)"
             return false
         }
+        // Validate the branch before using it in a push command.
+        let branchOK = !branch.isEmpty && !branch.hasPrefix("(") && !branch.contains(" ")
+        guard branchOK else {
+            line("❌ Can't commit — no valid branch detected (\(branch)). Click Refresh; if it says no access, grant Files & Folders permission to BuildBuddy.")
+            lastResult = "❌ No valid branch"
+            return false
+        }
         let safe = message.replacingOccurrences(of: "\"", with: "\\\"")
         let doPush = settings.pushAfterCommit && !askedAndDeclinedPush()
+
+        // Stage, then commit only if there's something staged. This avoids the misleading
+        // "Commit & Push failed (exit 1)" when the tree is already clean. If clean and push
+        // is requested, still push any local commits that haven't reached origin.
+        let commitCmd = "git add -A; " +
+            "if git diff --cached --quiet; then echo 'BB_NOTHING_TO_COMMIT'; else git commit -m \"\(safe)\"; fi"
+        let r = await run(commitCmd, cwd: p.url, label: "Commit")
+
+        let nothing = r.out.contains("BB_NOTHING_TO_COMMIT")
+        if nothing { line("Nothing new to commit — working tree is clean.") }
+
         if doPush {
-            _ = await run("git add -A && git commit -m \"\(safe)\" && git push origin \(Sh.q(branch))",
-                          cwd: p.url, label: "Commit & Push")
-        } else {
-            _ = await run("git add -A && git commit -m \"\(safe)\"",
-                          cwd: p.url, label: "Commit (no push)")
+            _ = await run("git push origin \(Sh.q(branch))", cwd: p.url, label: "Push")
         }
         await refresh()
         return true
@@ -848,7 +877,6 @@ extension Notification.Name { static let bbShowPreview = Notification.Name("bbSh
 
 struct Sidebar: View {
     @EnvironmentObject var store: Store
-    @State private var importing = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -873,15 +901,24 @@ struct Sidebar: View {
 
             Divider()
             HStack {
-                Button { importing = true } label: { Label("Add", systemImage: "plus") }
+                Button { pickProjectFolder() } label: { Label("Add", systemImage: "plus") }
                 Spacer()
                 Button(role: .destructive) { store.removeSelected() } label: { Image(systemName: "minus") }
                     .disabled(store.selectionID == nil)
             }
             .padding(8)
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result { store.addProject(at: url) }
+    }
+
+    // Native folder picker (SwiftUI .fileImporter shows blank in this unsigned .app).
+    private func pickProjectFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a project repo folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            store.addProject(at: url)
         }
     }
 
@@ -925,7 +962,6 @@ struct DetailView: View {
     @Binding var showOptions: Bool
 
     @State private var dropTargeted = false
-    @State private var importingZip = false
     @State private var sheet: ActiveSheet?
     @State private var commitText = ""
     @State private var pendingPreview: Store.DeliveryPreview?
@@ -947,9 +983,6 @@ struct DetailView: View {
             console
         }
         .navigationTitle(store.selected?.name ?? "BuildBuddy")
-        .fileImporter(isPresented: $importingZip, allowedContentTypes: [.zip]) { result in
-            if case .success(let url) = result { beginPreview(url) }
-        }
         .sheet(item: $sheet) { which in
             switch which {
             case .commit:
@@ -1035,7 +1068,7 @@ struct DetailView: View {
     private var actionGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
             ActionButton("Pull latest", "arrow.down.circle", key: "l") { Task { await store.pull() } }
-            ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { importingZip = true }
+            ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { pickDeliveryZip() }
             ActionButton("Commit & Push", "arrow.up.circle", key: "p") { commitText = ""; sheet = .commit }
             ActionButton("Switch branch", "arrow.left.arrow.right") { sheet = .switchBranch }
             ActionButton("New branch", "plus.square.on.square", key: "n") { sheet = .newBranch }
@@ -1094,6 +1127,23 @@ struct DetailView: View {
                 }
             }
             return true
+        }
+    }
+
+    // Native open panel for the delivery zip. SwiftUI's .fileImporter renders as a blank
+    // panel in this unsigned, hand-built .app, so we drive NSOpenPanel directly (same as the
+    // console Save panel, which works). This is the fix for the "empty dialog" on Apply delivery.
+    private func pickDeliveryZip() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a delivery zip"
+        panel.allowedContentTypes = [.zip]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        // Default to ~/Downloads since that's where deliveries usually land.
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        if panel.runModal() == .OK, let url = panel.url {
+            beginPreview(url)
         }
     }
 
