@@ -1,0 +1,1600 @@
+// BuildBuddy.swift — a native macOS control panel for your Xcode + GitHub + Cloudflare
+// workflow across multiple projects (Stocked, Atlas, The Sesh, …).
+//
+// It is a single-file SwiftUI app, compiled into a real .app by "Launch BuildBuddy.command".
+// Nothing here is project-specific: you add projects by dropping a folder or picking one.
+//
+// What it does, all via buttons:
+//   • Add projects (drag a repo folder in, or use the picker). Stored across launches.
+//   • Pull, Commit & Push, Switch / New / Merge branch — the whole git loop.
+//   • Apply a Claude delivery zip (drag it in or pick it) → overlays files at the correct
+//     paths, then commits (using the bundled COMMIT_MSG.txt) and pushes.
+//   • Open in Xcode.
+//   • Deploy the Cloudflare Worker (if the project has one).
+//   • Doctor: checks git / gh / node / wrangler / swift and installs the missing ones.
+// Every command it runs is printed to the console pane, so nothing is hidden.
+//
+// ── v1.1 improvements (see IMPROVEMENTS.md) ──────────────────────────────────
+// ── v1.2 changes ─────────────────────────────────────────────────────────────
+//  • FREEZE FIX: every shell command is now cancellable (⌘. or the Cancel button),
+//    runs with interactive git/ssh prompts disabled so nothing can block on stdin,
+//    and is killed after a configurable hard timeout. The old git-stash "snapshot"
+//    that caused the hang is replaced by a safe file-copy backup.
+//  • OPTIONS: a full Options/Settings window (⌘,) with ~24 settings, including a
+//    global "auto commit and push" switch and a default commit message.
+//  • DOWNLOADS AUTO-DETECT: watches ~/Downloads and matches a delivery zip to the
+//    selected project by inner top-folder name OR filename; auto-applies when
+//    auto-commit is on (otherwise opens the preview).
+//
+// ── v1.1 improvements (see IMPROVEMENTS.md) ──────────────────────────────────
+//  1. Auto-commit on apply (with a per-project toggle) — Option A from the playbook.
+//  2. Built-in delivery instructions (no loose PDF needed) — "Instructions" button.
+//  3. Commit-message safety check baked in (Section 3 of the playbook) with a preview
+//     sheet before anything is committed/pushed.
+//  4. Dry-run preview of a delivery zip before it touches your repo.
+//  5. Safe file-copy backup before applying a delivery (undo point) — see v1.2 note.
+//  6. Per-command exit-code reporting + a clear ✅/❌ result line (no silent failures).
+//  7. Console search, copy-all, and save-to-file.
+//  8. GitHub auth status surfaced in Doctor (gh auth status) + one-click `gh auth login`.
+//  9. Keyboard shortcuts for every primary action, and a persisted window-restoring guide.
+// 10. Safer shell quoting helper used everywhere, plus a "Reveal in Finder" and worker-path
+//     editor so misdetected worker folders can be fixed without re-adding the project.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+import AppKit
+import Foundation
+import UniformTypeIdentifiers
+
+// MARK: - Settings (Options menu, persisted to UserDefaults)
+//
+// Every option here is exposed in the Options window. They are intentionally plain
+// values so the whole thing round-trips through @AppStorage with no custom coding.
+
+struct AppSettings {
+    // — Auto commit & push —
+    var autoCommitAndPush: Bool          // global master switch for commit+push on apply
+    var defaultCommitMessage: String     // used when a drop has no COMMIT_MSG.txt
+    var pushAfterCommit: Bool            // if false, commit only (no push)
+
+    // — Downloads auto-detect —
+    var watchDownloads: Bool             // scan ~/Downloads for matching delivery zips
+    var autoApplyFound: Bool             // when auto-commit is on, apply a match automatically
+    var downloadsScanSeconds: Double     // poll interval
+
+    // — Branch / pull —
+    var defaultBranch: String            // fallback base for New branch
+    var autoPullBeforeApply: Bool        // pull latest before overlaying a delivery
+    var autoPullOnSelect: Bool           // pull when a project is selected
+
+    // — Confirmations & safety —
+    var confirmBeforeApply: Bool         // show the preview sheet (off = apply immediately)
+    var confirmBeforePush: Bool          // ask before any push
+    var commandTimeoutSeconds: Double    // hard timeout so nothing can hang the UI
+    var blockUnsafeCommitMessages: Bool  // enforce the playbook commit-message rule
+
+    // — 10 more options —
+    var backupBeforeApply: Bool          // copy changed files to a backup folder first
+    var openXcodeAfterApply: Bool        // open Xcode once a delivery lands
+    var deployWorkerAfterPush: Bool      // run wrangler deploy after a successful push
+    var clearConsoleOnAction: Bool       // wipe console at the start of each action
+    var verboseLogging: Bool             // echo full commands and extra detail
+    var monospaceConsole: Bool           // console font style
+    var soundOnFinish: Bool              // play a system sound on success/failure
+    var confirmBeforeRemoveProject: Bool // guard the minus button
+    var rememberLastProject: Bool        // reselect last project on launch
+    var dryRunMode: Bool                 // print what WOULD happen, never write/commit/push
+
+    static let `default` = AppSettings(
+        autoCommitAndPush: true,
+        defaultCommitMessage: "BuildBuddy delivery applied",
+        pushAfterCommit: true,
+        watchDownloads: true,
+        autoApplyFound: true,
+        downloadsScanSeconds: 8,
+        defaultBranch: "main",
+        autoPullBeforeApply: false,
+        autoPullOnSelect: false,
+        confirmBeforeApply: true,
+        confirmBeforePush: false,
+        commandTimeoutSeconds: 120,
+        blockUnsafeCommitMessages: true,
+        backupBeforeApply: true,
+        openXcodeAfterApply: false,
+        deployWorkerAfterPush: false,
+        clearConsoleOnAction: false,
+        verboseLogging: true,
+        monospaceConsole: true,
+        soundOnFinish: false,
+        confirmBeforeRemoveProject: true,
+        rememberLastProject: true,
+        dryRunMode: false
+    )
+}
+
+@MainActor
+final class SettingsStore: ObservableObject {
+    @AppStorage("autoCommitAndPush")        var autoCommitAndPush = AppSettings.default.autoCommitAndPush
+    @AppStorage("defaultCommitMessage")     var defaultCommitMessage = AppSettings.default.defaultCommitMessage
+    @AppStorage("pushAfterCommit")          var pushAfterCommit = AppSettings.default.pushAfterCommit
+
+    @AppStorage("watchDownloads")           var watchDownloads = AppSettings.default.watchDownloads
+    @AppStorage("autoApplyFound")           var autoApplyFound = AppSettings.default.autoApplyFound
+    @AppStorage("downloadsScanSeconds")     var downloadsScanSeconds = AppSettings.default.downloadsScanSeconds
+
+    @AppStorage("defaultBranch")            var defaultBranch = AppSettings.default.defaultBranch
+    @AppStorage("autoPullBeforeApply")      var autoPullBeforeApply = AppSettings.default.autoPullBeforeApply
+    @AppStorage("autoPullOnSelect")         var autoPullOnSelect = AppSettings.default.autoPullOnSelect
+
+    @AppStorage("confirmBeforeApply")       var confirmBeforeApply = AppSettings.default.confirmBeforeApply
+    @AppStorage("confirmBeforePush")        var confirmBeforePush = AppSettings.default.confirmBeforePush
+    @AppStorage("commandTimeoutSeconds")    var commandTimeoutSeconds = AppSettings.default.commandTimeoutSeconds
+    @AppStorage("blockUnsafeCommitMessages") var blockUnsafeCommitMessages = AppSettings.default.blockUnsafeCommitMessages
+
+    @AppStorage("backupBeforeApply")        var backupBeforeApply = AppSettings.default.backupBeforeApply
+    @AppStorage("openXcodeAfterApply")      var openXcodeAfterApply = AppSettings.default.openXcodeAfterApply
+    @AppStorage("deployWorkerAfterPush")    var deployWorkerAfterPush = AppSettings.default.deployWorkerAfterPush
+    @AppStorage("clearConsoleOnAction")     var clearConsoleOnAction = AppSettings.default.clearConsoleOnAction
+    @AppStorage("verboseLogging")           var verboseLogging = AppSettings.default.verboseLogging
+    @AppStorage("monospaceConsole")         var monospaceConsole = AppSettings.default.monospaceConsole
+    @AppStorage("soundOnFinish")            var soundOnFinish = AppSettings.default.soundOnFinish
+    @AppStorage("confirmBeforeRemoveProject") var confirmBeforeRemoveProject = AppSettings.default.confirmBeforeRemoveProject
+    @AppStorage("rememberLastProject")      var rememberLastProject = AppSettings.default.rememberLastProject
+    @AppStorage("dryRunMode")               var dryRunMode = AppSettings.default.dryRunMode
+
+    func resetToDefaults() {
+        let d = AppSettings.default
+        autoCommitAndPush = d.autoCommitAndPush; defaultCommitMessage = d.defaultCommitMessage
+        pushAfterCommit = d.pushAfterCommit; watchDownloads = d.watchDownloads
+        autoApplyFound = d.autoApplyFound; downloadsScanSeconds = d.downloadsScanSeconds
+        defaultBranch = d.defaultBranch; autoPullBeforeApply = d.autoPullBeforeApply
+        autoPullOnSelect = d.autoPullOnSelect; confirmBeforeApply = d.confirmBeforeApply
+        confirmBeforePush = d.confirmBeforePush; commandTimeoutSeconds = d.commandTimeoutSeconds
+        blockUnsafeCommitMessages = d.blockUnsafeCommitMessages; backupBeforeApply = d.backupBeforeApply
+        openXcodeAfterApply = d.openXcodeAfterApply; deployWorkerAfterPush = d.deployWorkerAfterPush
+        clearConsoleOnAction = d.clearConsoleOnAction; verboseLogging = d.verboseLogging
+        monospaceConsole = d.monospaceConsole; soundOnFinish = d.soundOnFinish
+        confirmBeforeRemoveProject = d.confirmBeforeRemoveProject; rememberLastProject = d.rememberLastProject
+        dryRunMode = d.dryRunMode
+    }
+}
+
+// MARK: - Model
+
+struct Project: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var name: String
+    var path: String            // absolute repo root
+    var workerSubpath: String?  // optional relative path to a wrangler dir, e.g. "_worker/x"
+    var autoCommitOnApply: Bool = true   // improvement #1 — per-project toggle
+    var url: URL { URL(fileURLWithPath: path) }
+
+    init(id: UUID = UUID(), name: String, path: String, workerSubpath: String? = nil, autoCommitOnApply: Bool = true) {
+        self.id = id; self.name = name; self.path = path
+        self.workerSubpath = workerSubpath; self.autoCommitOnApply = autoCommitOnApply
+    }
+
+    // Custom decoding so older projects.json files (saved before autoCommitOnApply existed)
+    // still load instead of silently wiping the saved project list on upgrade.
+    enum CodingKeys: String, CodingKey { case id, name, path, workerSubpath, autoCommitOnApply }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        path = try c.decode(String.self, forKey: .path)
+        workerSubpath = try c.decodeIfPresent(String.self, forKey: .workerSubpath)
+        autoCommitOnApply = try c.decodeIfPresent(Bool.self, forKey: .autoCommitOnApply) ?? true
+    }
+}
+
+// MARK: - Persistence
+
+enum Persist {
+    static var dir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let d = base.appendingPathComponent("BuildBuddy", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    static var file: URL { dir.appendingPathComponent("projects.json") }
+
+    static func load() -> [Project] {
+        guard let data = try? Data(contentsOf: file),
+              let list = try? JSONDecoder().decode([Project].self, from: data) else { return [] }
+        return list
+    }
+    static func save(_ list: [Project]) {
+        if let data = try? JSONEncoder().encode(list) { try? data.write(to: file) }
+    }
+}
+
+// MARK: - Shell
+
+struct ShellResult { let code: Int32; let out: String }
+
+// Improvement #10 — one place that safely single-quotes an argument for /bin/zsh,
+// so paths with spaces or quotes can never break a command or inject one.
+enum Sh {
+    static func q(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+// Improvement #3 — the commit-message safety check from the playbook (Section 3 / Appendix A),
+// implemented natively so a risky message is caught before it ever reaches the shell.
+enum CommitSafety {
+    /// Returns the list of problems found. Empty == SAFE.
+    static func problems(in message: String) -> [String] {
+        var bad: [String] = []
+        if message.contains("`") { bad.append("backtick (`) — runs as command substitution") }
+        if message.contains("$(") { bad.append("$( ) — command substitution") }
+        if message.range(of: #"\$[A-Za-z_{]"#, options: .regularExpression) != nil {
+            bad.append("$NAME / ${…} — variable expansion")
+        }
+        if message.contains("\"") { bad.append("double-quote (\") — closes the message string early") }
+        if message.contains("\\") { bad.append("backslash (\\) — interacts badly with shell escaping") }
+        return bad
+    }
+    static func isSafe(_ message: String) -> Bool { problems(in: message).isEmpty }
+}
+
+// MARK: - Store
+
+@MainActor
+final class Store: ObservableObject {
+    @Published var projects: [Project] = Persist.load()
+    @Published var selectionID: Project.ID?
+    @Published var console: String = "Welcome to BuildBuddy.\nAdd a project (drag a repo folder into the sidebar, or click +), then use the buttons.\nNew here? Click Instructions for the delivery playbook.\n\n"
+    @Published var busy = false
+    @Published var branch: String = "—"
+    @Published var branches: [String] = []
+    @Published var statusLine: String = ""
+    @Published var lastResult: String = ""        // improvement #6 — ✅/❌ summary line
+
+    // Freeze-fix support.
+    let settings = SettingsStore()
+    @Published var canCancel = false              // drives the Cancel button in the UI
+    private var currentProcess: Process?          // the live child process, so we can kill it
+    @Published var seenDownloadZips: Set<String> = []   // de-dupe Downloads auto-detect
+
+    var selected: Project? { projects.first { $0.id == selectionID } }
+
+    func append(_ s: String) { console += s }
+    func line(_ s: String)   { console += "\n\(s)\n" }
+    func clearConsole()      { console = "" }
+
+    // Freeze-fix: kill whatever command is currently running.
+    func cancelRunning() {
+        if let p = currentProcess, p.isRunning {
+            line("⛔️ Cancel requested — terminating the running command.")
+            p.terminate()
+            // Hard kill the whole process group shortly after, in case it ignores SIGTERM.
+            let pid = p.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                kill(-pid, SIGKILL)   // negative pid = process group
+            }
+        }
+    }
+
+    func select(_ p: Project) {
+        selectionID = p.id
+        UserDefaults.standard.set(p.id.uuidString, forKey: "lastSelectedProjectID")
+        Task {
+            await refresh()
+            if settings.autoPullOnSelect { await pull() }
+        }
+    }
+
+    // Restore the last project on launch when the option is on. Call once from the App.
+    func restoreLastSelectionIfEnabled() {
+        guard settings.rememberLastProject,
+              let idStr = UserDefaults.standard.string(forKey: "lastSelectedProjectID"),
+              let id = UUID(uuidString: idStr),
+              let p = projects.first(where: { $0.id == id }) else { return }
+        select(p)
+    }
+
+    func updateSelected(_ mutate: (inout Project) -> Void) {
+        guard let id = selectionID, let idx = projects.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&projects[idx])
+        Persist.save(projects)
+    }
+
+    func addProject(at url: URL) {
+        // Resolve to the git top-level if possible, so subfolders still map to the repo root.
+        var root = url
+        let topRes = syncShell("git rev-parse --show-toplevel", cwd: url)
+        let top = topRes.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if topRes.code == 0, !top.isEmpty, FileManager.default.fileExists(atPath: top) {
+            root = URL(fileURLWithPath: top)
+        }
+        let name = root.lastPathComponent
+        guard !projects.contains(where: { $0.path == root.path }) else { return }
+        // Auto-detect a worker folder (a directory containing wrangler.toml).
+        var worker: String? = nil
+        if let found = findWorker(in: root) {
+            worker = found.path.replacingOccurrences(of: root.path + "/", with: "")
+        }
+        let p = Project(name: name, path: root.path, workerSubpath: worker)
+        projects.append(p)
+        Persist.save(projects)
+        select(p)
+    }
+
+    func removeSelected() {
+        guard let id = selectionID else { return }
+        if settings.confirmBeforeRemoveProject {
+            let alert = NSAlert()
+            alert.messageText = "Remove this project from BuildBuddy?"
+            alert.informativeText = "This only removes it from the list. Your files and git repo are untouched."
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        projects.removeAll { $0.id == id }
+        Persist.save(projects)
+        selectionID = projects.first?.id
+        if let p = selected { select(p) } else { branch = "—"; branches = [] }
+    }
+
+    private func findWorker(in root: URL) -> URL? {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: nil,
+                                     options: [.skipsHiddenFiles]) else { return nil }
+        for case let u as URL in en where u.lastPathComponent == "wrangler.toml" {
+            return u.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    // Synchronous shell (used for quick metadata reads). Hardened with a short timeout and
+    // non-interactive env so a stuck git call can't freeze the metadata reads either.
+    @discardableResult
+    func syncShell(_ command: String, cwd: URL?, timeout: Double = 15) -> ShellResult {
+        let prefix = "export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true; "
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", prefix + command]
+        if let cwd { p.currentDirectoryURL = cwd }
+        p.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        p.standardOutput = pipe; p.standardError = pipe
+        do { try p.run() } catch { return ShellResult(code: -1, out: error.localizedDescription) }
+        let deadline = DispatchTime.now() + timeout
+        let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: deadline, execute: watchdog)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        watchdog.cancel()
+        return ShellResult(code: p.terminationStatus, out: String(data: data, encoding: .utf8) ?? "")
+    }
+
+    // Streaming shell — prints live to the console pane.
+    // FREEZE FIX: this version
+    //   • disables interactive git/ssh prompts (GIT_TERMINAL_PROMPT=0, BatchMode) so a
+    //     command can NEVER block waiting on stdin — the #1 cause of the hang;
+    //   • runs in its own process group and is killable via Cancel (cancelRunning());
+    //   • enforces a hard timeout from Settings, after which it terminates the child.
+    // Improvement #6 — reports the exit code as a ✅/❌ line so failures are never silent.
+    @discardableResult
+    func run(_ command: String, cwd: URL?, echo: Bool = true, label: String? = nil) async -> ShellResult {
+        // Dry-run mode: never actually execute anything that runs here.
+        if settings.dryRunMode {
+            line("〰️ DRY RUN — would execute: \(command)")
+            lastResult = "〰️ dry run (nothing executed)"
+            return ShellResult(code: 0, out: "")
+        }
+        if echo { line("$ \(command)") }
+        busy = true
+        canCancel = true
+        defer { busy = false; canCancel = false; currentProcess = nil }
+
+        let timeout = max(5, settings.commandTimeoutSeconds)
+        // Non-interactive environment prefix so nothing waits for a password/confirmation.
+        let prefix = "export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new'; "
+
+        let result: ShellResult = await withCheckedContinuation { (cont: CheckedContinuation<ShellResult, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                p.arguments = ["-lc", prefix + command]
+                if let cwd { p.currentDirectoryURL = cwd }
+                // Own process group so Cancel can kill children too (e.g. npx, git subprocesses).
+                p.standardInput = FileHandle.nullDevice
+                let pipe = Pipe()
+                p.standardOutput = pipe; p.standardError = pipe
+                let handle = pipe.fileHandleForReading
+                var full = Data()
+                let lock = NSLock()
+                handle.readabilityHandler = { h in
+                    let d = h.availableData
+                    guard !d.isEmpty else { return }
+                    lock.lock(); full.append(d); lock.unlock()
+                    if let s = String(data: d, encoding: .utf8) {
+                        Task { @MainActor in self.append(s) }
+                    }
+                }
+                do {
+                    try p.run()
+                    setpgid(p.processIdentifier, p.processIdentifier)  // detach into its own group
+                } catch {
+                    Task { @MainActor in self.line("⚠️ \(error.localizedDescription)") }
+                    cont.resume(returning: ShellResult(code: -1, out: error.localizedDescription)); return
+                }
+                Task { @MainActor in self.currentProcess = p }
+
+                // Hard timeout watchdog.
+                var timedOut = false
+                let watchdog = DispatchWorkItem {
+                    if p.isRunning {
+                        timedOut = true
+                        Task { @MainActor in self.line("⏱️ Command exceeded \(Int(timeout))s — terminating.") }
+                        p.terminate()
+                        let pid = p.processIdentifier
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { kill(-pid, SIGKILL) }
+                    }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+                p.waitUntilExit()
+                watchdog.cancel()
+                handle.readabilityHandler = nil
+                lock.lock(); let out = String(data: full, encoding: .utf8) ?? ""; lock.unlock()
+                let code = timedOut ? Int32(124) : p.terminationStatus  // 124 == timeout, like GNU
+                cont.resume(returning: ShellResult(code: code, out: out))
+            }
+        }
+        let tag = label ?? "command"
+        if result.code == 0 {
+            lastResult = "✅ \(tag) succeeded"
+            if settings.verboseLogging { line("✅ \(tag) finished (exit 0)") }
+        } else if result.code == 124 {
+            lastResult = "⏱️ \(tag) timed out"
+            line("⏱️ \(tag) timed out — you can adjust the timeout in Options.")
+        } else {
+            lastResult = "❌ \(tag) failed (exit \(result.code))"
+            line("❌ \(tag) failed — exit code \(result.code)")
+        }
+        if settings.soundOnFinish {
+            NSSound(named: result.code == 0 ? "Glass" : "Basso")?.play()
+        }
+        return result
+    }
+
+    // MARK: Git actions
+
+    func refresh() async {
+        guard let p = selected else { return }
+        let b = syncShell("git rev-parse --abbrev-ref HEAD", cwd: p.url).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        branch = b.isEmpty ? "(no git)" : b
+        let raw = syncShell("git branch -a --format='%(refname:short)'", cwd: p.url).out
+        branches = raw.split(separator: "\n").map { String($0) }
+            .map { $0.replacingOccurrences(of: "origin/", with: "") }
+            .filter { !$0.contains("HEAD") }
+        branches = Array(Set(branches)).sorted()
+        let st = syncShell("git status --porcelain", cwd: p.url).out
+        statusLine = st.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "clean" : "uncommitted changes"
+    }
+
+    func pull() async {
+        guard let p = selected else { return }
+        _ = await run("git pull --ff-only origin \(Sh.q(branch)) || git pull --no-edit origin \(Sh.q(branch))",
+                      cwd: p.url, label: "Pull")
+        await refresh()
+    }
+
+    // Improvement #3 — guard the commit message before running it. Returns false if blocked.
+    @discardableResult
+    func commitPush(message: String) async -> Bool {
+        guard let p = selected, !message.isEmpty else { return false }
+        let problems = CommitSafety.problems(in: message)
+        if settings.blockUnsafeCommitMessages, !problems.isEmpty {
+            line("❌ Commit blocked — message contains shell-unsafe characters:")
+            for x in problems { line("   • \(x)") }
+            line("Edit the message (plain prose, ASCII) and try again. See Instructions § Commit-Message Rule.")
+            lastResult = "❌ Commit blocked (unsafe message)"
+            return false
+        }
+        let safe = message.replacingOccurrences(of: "\"", with: "\\\"")
+        let doPush = settings.pushAfterCommit && !askedAndDeclinedPush()
+        if doPush {
+            _ = await run("git add -A && git commit -m \"\(safe)\" && git push origin \(Sh.q(branch))",
+                          cwd: p.url, label: "Commit & Push")
+        } else {
+            _ = await run("git add -A && git commit -m \"\(safe)\"",
+                          cwd: p.url, label: "Commit (no push)")
+        }
+        await refresh()
+        return true
+    }
+
+    // Respects "Ask before pushing": returns true if the user declined the push.
+    private func askedAndDeclinedPush() -> Bool {
+        guard settings.confirmBeforePush else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Push to origin/\(branch)?"
+        alert.informativeText = "Commit will proceed either way. Choose whether to push now."
+        alert.addButton(withTitle: "Commit & Push")
+        alert.addButton(withTitle: "Commit only")
+        return alert.runModal() != .alertFirstButtonReturn
+    }
+
+    func switchBranch(_ name: String) async {
+        guard let p = selected else { return }
+        _ = await run("git checkout \(Sh.q(name)) 2>/dev/null || git checkout -t \(Sh.q("origin/" + name))",
+                      cwd: p.url, label: "Switch branch")
+        await refresh()
+    }
+
+    func newBranch(_ name: String, base: String) async {
+        guard let p = selected else { return }
+        _ = await run("git checkout \(Sh.q(base)) && git pull --ff-only origin \(Sh.q(base)) 2>/dev/null; git checkout -b \(Sh.q(name)) && git push -u origin \(Sh.q(name))",
+                      cwd: p.url, label: "New branch")
+        await refresh()
+    }
+
+    func merge(_ src: String) async {
+        guard let p = selected else { return }
+        _ = await run("git merge --no-edit \(Sh.q(src)) && git push origin \(Sh.q(branch))",
+                      cwd: p.url, label: "Merge")
+        await refresh()
+    }
+
+    func openXcode() async {
+        guard let p = selected else { return }
+        let ws = syncShell("find . -maxdepth 2 -name '*.xcworkspace' | head -n1", cwd: p.url).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let proj = ws.isEmpty
+            ? syncShell("find . -maxdepth 2 -name '*.xcodeproj' | head -n1", cwd: p.url).out.trimmingCharacters(in: .whitespacesAndNewlines)
+            : ws
+        if proj.isEmpty { line("No .xcodeproj/.xcworkspace found."); return }
+        _ = await run("open \(Sh.q(proj))", cwd: p.url, label: "Open in Xcode")
+    }
+
+    func deployWorker() async {
+        guard let p = selected, let sub = p.workerSubpath else { line("No worker folder in this project."); return }
+        _ = await run("cd \(Sh.q(sub)) && npx wrangler deploy", cwd: p.url, label: "Deploy Worker")
+    }
+
+    // Improvement #10 — open the repo in Finder.
+    func revealInFinder() {
+        guard let p = selected else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([p.url])
+    }
+
+    // Improvement #7 — save the console transcript to a file.
+    func saveConsole() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "BuildBuddy-console.txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? console.write(to: url, atomically: true, encoding: .utf8)
+            line("Saved console to \(url.path)")
+        }
+    }
+
+    // MARK: Apply a Claude delivery zip
+
+    // Improvement #4 — inspect a delivery zip without touching the repo.
+    struct DeliveryPreview {
+        var files: [String]
+        var commitMessage: String
+        var hasCommitScript: Bool
+        var messageProblems: [String]
+        var tmpDir: URL
+        var sourceDir: String
+    }
+
+    func previewDelivery(zip: URL) async -> DeliveryPreview? {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("bb_\(UUID().uuidString)")
+        let unzip = await run("mkdir -p \(Sh.q(tmp.path)) && /usr/bin/unzip -o \(Sh.q(zip.path)) -d \(Sh.q(tmp.path))",
+                              cwd: nil, label: "Unzip (preview)")
+        if unzip.code != 0 { line("Unzip failed."); return nil }
+        let inner = syncShell("find \(Sh.q(tmp.path)) -mindepth 1 -maxdepth 1 -type d | head -n1", cwd: nil).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let src = inner.isEmpty ? tmp.path : inner
+        let listing = syncShell("cd \(Sh.q(src)) && find . -type f -not -name COMMIT_MSG.txt -not -name commit.sh | sed 's|^\\./||' | sort", cwd: nil).out
+        let files = listing.split(separator: "\n").map(String.init)
+        var msg = ""
+        let msgPath = "\(src)/COMMIT_MSG.txt"
+        if FileManager.default.fileExists(atPath: msgPath) {
+            msg = (try? String(contentsOfFile: msgPath, encoding: .utf8)) ?? ""
+        }
+        msg = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasScript = FileManager.default.fileExists(atPath: "\(src)/commit.sh")
+        return DeliveryPreview(files: files,
+                               commitMessage: msg,
+                               hasCommitScript: hasScript,
+                               messageProblems: CommitSafety.problems(in: msg),
+                               tmpDir: tmp,
+                               sourceDir: src)
+    }
+
+    // SAFE BACKUP (replaces the old git-stash snapshot, which was the freeze trigger).
+    // Instead of mutating the working tree with stash push/apply, we copy the files the
+    // delivery is about to overwrite into a timestamped backup folder. Pure file copy —
+    // it can never deadlock the working tree or wait on a git prompt.
+    @discardableResult
+    func backupBeforeApply(preview: DeliveryPreview) async -> URL? {
+        guard let p = selected, settings.backupBeforeApply else { return nil }
+        let stamp = DateFormatter.bbStamp.string(from: Date())
+        let backupDir = p.url.appendingPathComponent(".buildbuddy-backups/\(stamp)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        } catch { line("⚠️ Could not create backup folder: \(error.localizedDescription)"); return nil }
+        var copied = 0
+        for rel in preview.files {
+            let existing = p.url.appendingPathComponent(rel)
+            guard FileManager.default.fileExists(atPath: existing.path) else { continue }
+            let dest = backupDir.appendingPathComponent(rel)
+            try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? FileManager.default.copyItem(at: existing, to: dest)
+            copied += 1
+        }
+        line("🗂️ Backed up \(copied) existing file(s) to \(backupDir.path) (undo point).")
+        return backupDir
+    }
+
+    // Applies an already-previewed delivery. Honors all global Settings as well as the
+    // per-project auto-commit toggle and the commit-safety guard.
+    func commitDelivery(from preview: DeliveryPreview) async {
+        guard let p = selected else { line("Select a project first."); return }
+        defer { try? FileManager.default.removeItem(at: preview.tmpDir) }
+
+        if settings.clearConsoleOnAction { clearConsole() }
+
+        // Optional pull-before-apply (off by default to avoid surprises).
+        if settings.autoPullBeforeApply {
+            line("Auto-pull before apply is ON.")
+            await pull()
+        }
+
+        await backupBeforeApply(preview: preview)
+
+        _ = await run("/usr/bin/rsync -a --exclude COMMIT_MSG.txt --exclude commit.sh \(Sh.q(preview.sourceDir))/ \(Sh.q(p.path))/",
+                      cwd: nil, label: "Overlay files")
+        line("Applied. Changes:")
+        _ = await run("git status --short", cwd: p.url, echo: true, label: "Status")
+        await refresh()
+
+        // Decide commit behavior: global master switch AND per-project toggle must allow it.
+        let autoOK = settings.autoCommitAndPush && p.autoCommitOnApply
+        let msg = preview.commitMessage.isEmpty ? settings.defaultCommitMessage : preview.commitMessage
+        let safe = CommitSafety.isSafe(msg) || !settings.blockUnsafeCommitMessages
+
+        if autoOK && !msg.isEmpty && safe {
+            line("Auto-commit \(settings.pushAfterCommit ? "& push " : "")is ON — committing…")
+            _ = await commitPush(message: msg)
+            await maybePostApply()
+        } else if autoOK && !msg.isEmpty && !safe {
+            line("Auto-commit is ON, but the message is shell-unsafe — opening it for review instead.")
+            pendingCommitMessage = msg
+        } else if !preview.commitMessage.isEmpty {
+            pendingCommitMessage = preview.commitMessage   // opens the review sheet
+        } else {
+            line("Applied. Auto-commit is off — review your changes, then Commit & Push.")
+        }
+    }
+
+    // Post-apply conveniences (settings-gated).
+    func maybePostApply() async {
+        if settings.openXcodeAfterApply { await openXcode() }
+        if settings.deployWorkerAfterPush, selected?.workerSubpath != nil { await deployWorker() }
+    }
+
+    // MARK: Downloads auto-detect
+
+    // Scans ~/Downloads for a zip whose inner top folder matches the selected project's repo
+    // name OR whose filename contains the project name (broadest match, per your choice).
+    // Returns the first new match not already seen this session.
+    func scanDownloadsForDelivery() async -> URL? {
+        guard settings.watchDownloads, let p = selected else { return nil }
+        let dl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard let dl else { return nil }
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: dl, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return nil }
+        let zips = items.filter { $0.pathExtension.lowercased() == "zip" }
+            .sorted { (a, b) in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                return da > db
+            }
+        let repoName = p.name.lowercased()
+        for zip in zips {
+            if seenDownloadZips.contains(zip.path) { continue }
+            let fileMatches = zip.lastPathComponent.lowercased().contains(repoName)
+            var innerMatches = false
+            // Peek at the inner top folder name without extracting fully.
+            let listing = syncShell("/usr/bin/unzip -Z1 \(Sh.q(zip.path)) | head -n1", cwd: nil, timeout: 10).out
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let topFolder = listing.split(separator: "/").first.map(String.init)?.lowercased() ?? ""
+            if topFolder == repoName { innerMatches = true }
+            if fileMatches || innerMatches {
+                seenDownloadZips.insert(zip.path)
+                return zip
+            }
+        }
+        return nil
+    }
+
+    @Published var pendingCommitMessage: String = ""
+}
+
+extension DateFormatter {
+    static let bbStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return f
+    }()
+}
+
+// MARK: - App
+
+@main
+struct BuildBuddyApp: App {
+    @StateObject private var store = Store()
+    var body: some Scene {
+        WindowGroup("BuildBuddy") {
+            ContentView().environmentObject(store)
+                .frame(minWidth: 900, minHeight: 600)
+        }
+        .windowStyle(.titleBar)
+        // Improvement #9 — menu commands with keyboard shortcuts.
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Pull Latest") { Task { await store.pull() } }
+                    .keyboardShortcut("l", modifiers: [.command])
+                Button("Refresh") { Task { await store.refresh() } }
+                    .keyboardShortcut("r", modifiers: [.command])
+                Button("Cancel Running Command") { store.cancelRunning() }
+                    .keyboardShortcut(".", modifiers: [.command])
+            }
+        }
+        // Native Settings window (⌘,) holding the full Options panel.
+        Settings {
+            OptionsView().environmentObject(store)
+        }
+    }
+}
+
+// MARK: - Root view
+
+struct ContentView: View {
+    @EnvironmentObject var store: Store
+    @State private var showDoctor = false
+    @State private var showInstructions = false
+    @State private var showOptions = false
+    @State private var foundZip: URL?
+
+    var body: some View {
+        NavigationSplitView {
+            Sidebar()
+                .frame(minWidth: 220)
+        } detail: {
+            if store.selected == nil {
+                EmptyDetail(showInstructions: $showInstructions)
+            } else {
+                DetailView(showDoctor: $showDoctor, showInstructions: $showInstructions, showOptions: $showOptions)
+            }
+        }
+        .sheet(isPresented: $showDoctor) { DoctorView().environmentObject(store) }
+        .sheet(isPresented: $showInstructions) { InstructionsView() }
+        .sheet(isPresented: $showOptions) { OptionsView().environmentObject(store).frame(width: 600, height: 640) }
+        // Downloads auto-detect — polls on the interval from Settings while a project is selected.
+        .task(id: store.selectionID) { await watchDownloadsLoop() }
+        .onAppear { store.restoreLastSelectionIfEnabled() }
+    }
+
+    // Polling loop (not a thread that can hang the UI). Honors watchDownloads + interval.
+    private func watchDownloadsLoop() async {
+        while !Task.isCancelled {
+            let interval = max(3, store.settings.downloadsScanSeconds)
+            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            guard store.settings.watchDownloads, store.selected != nil, !store.busy else { continue }
+            if let zip = await store.scanDownloadsForDelivery() {
+                store.line("📥 Found a matching delivery in Downloads: \(zip.lastPathComponent)")
+                // Auto-apply only when auto-commit is on (your choice); otherwise open the preview.
+                if store.settings.autoCommitAndPush && store.settings.autoApplyFound {
+                    if let preview = await store.previewDelivery(zip: zip) {
+                        await store.commitDelivery(from: preview)
+                    }
+                } else {
+                    if let preview = await store.previewDelivery(zip: zip) {
+                        await MainActor.run { foundZip = zip }
+                        // Surface via the normal preview path.
+                        NotificationCenter.default.post(name: .bbShowPreview, object: preview)
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension Notification.Name { static let bbShowPreview = Notification.Name("bbShowPreview") }
+
+// MARK: - Sidebar
+
+struct Sidebar: View {
+    @EnvironmentObject var store: Store
+    @State private var importing = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            List(selection: Binding(get: { store.selectionID }, set: { id in
+                if let id, let p = store.projects.first(where: { $0.id == id }) { store.select(p) }
+            })) {
+                Section("Projects") {
+                    ForEach(store.projects) { p in
+                        HStack {
+                            Image(systemName: "folder.fill").foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(p.name).fontWeight(.medium)
+                                Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }.tag(p.id)
+                    }
+                }
+            }
+            .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+                handleDrop(providers); return true
+            }
+
+            Divider()
+            HStack {
+                Button { importing = true } label: { Label("Add", systemImage: "plus") }
+                Spacer()
+                Button(role: .destructive) { store.removeSelected() } label: { Image(systemName: "minus") }
+                    .disabled(store.selectionID == nil)
+            }
+            .padding(8)
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { store.addProject(at: url) }
+        }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) {
+        for prov in providers {
+            _ = prov.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+                if isDir.boolValue {
+                    Task { @MainActor in store.addProject(at: url) }
+                }
+            }
+        }
+    }
+}
+
+struct EmptyDetail: View {
+    @Binding var showInstructions: Bool
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "shippingbox").font(.system(size: 48)).foregroundStyle(.secondary)
+            Text("No project selected").font(.title2.bold())
+            Text("Drag a repo folder into the sidebar, or click + to add one.")
+                .foregroundStyle(.secondary)
+            Button { showInstructions = true } label: {
+                Label("Read the delivery instructions", systemImage: "book")
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Detail
+
+struct DetailView: View {
+    @EnvironmentObject var store: Store
+    @Binding var showDoctor: Bool
+    @Binding var showInstructions: Bool
+    @Binding var showOptions: Bool
+
+    @State private var dropTargeted = false
+    @State private var importingZip = false
+    @State private var sheet: ActiveSheet?
+    @State private var commitText = ""
+    @State private var pendingPreview: Store.DeliveryPreview?
+    @State private var consoleQuery = ""
+
+    enum ActiveSheet: Identifiable {
+        case commit, newBranch, switchBranch, merge, deliveryPreview
+        var id: Int { hashValue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            guideStrip
+            Divider()
+            actionGrid
+                .padding(16)
+            Divider()
+            console
+        }
+        .navigationTitle(store.selected?.name ?? "BuildBuddy")
+        .fileImporter(isPresented: $importingZip, allowedContentTypes: [.zip]) { result in
+            if case .success(let url) = result { beginPreview(url) }
+        }
+        .sheet(item: $sheet) { which in
+            switch which {
+            case .commit:
+                CommitSheet(text: $commitText) { msg in Task { await store.commitPush(message: msg) } }
+            case .newBranch:
+                NewBranchSheet(branches: store.branches) { name, base in Task { await store.newBranch(name, base: base) } }
+            case .switchBranch:
+                PickBranchSheet(title: "Switch to branch", branches: store.branches) { b in Task { await store.switchBranch(b) } }
+            case .merge:
+                PickBranchSheet(title: "Merge branch into \(store.branch)", branches: store.branches) { b in Task { await store.merge(b) } }
+            case .deliveryPreview:
+                if let preview = pendingPreview {
+                    DeliveryPreviewSheet(preview: preview,
+                                         autoCommit: store.selected?.autoCommitOnApply ?? true,
+                                         onApply: { Task { await store.commitDelivery(from: preview); pendingPreview = nil } },
+                                         onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir); pendingPreview = nil })
+                }
+            }
+        }
+        .onChange(of: store.pendingCommitMessage) { _, msg in
+            if !msg.isEmpty { commitText = msg; sheet = .commit; store.pendingCommitMessage = "" }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bbShowPreview)) { note in
+            if let preview = note.object as? Store.DeliveryPreview {
+                pendingPreview = preview
+                sheet = .deliveryPreview
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.selected?.name ?? "").font(.title2.bold())
+                Text(store.selected?.path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            // Improvement #1 — visible per-project auto-commit toggle.
+            if let p = store.selected {
+                Toggle(isOn: Binding(
+                    get: { p.autoCommitOnApply },
+                    set: { v in store.updateSelected { $0.autoCommitOnApply = v } }
+                )) { Text("Auto-commit").font(.caption) }
+                .toggleStyle(.switch)
+                .help("When ON, applying a delivery commits & pushes automatically using its COMMIT_MSG.txt.")
+            }
+            Label(store.branch, systemImage: "arrow.triangle.branch")
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(.quaternary, in: Capsule())
+            Text(store.statusLine)
+                .font(.caption).foregroundStyle(store.statusLine == "clean" ? .green : .orange)
+            if store.busy { ProgressView().scaleEffect(0.6) }
+            // FREEZE FIX UI — always-available Cancel while a command runs (also ⌘.).
+            if store.canCancel {
+                Button(role: .destructive) { store.cancelRunning() } label: {
+                    Label("Cancel", systemImage: "stop.circle.fill")
+                }
+                .help("Stop the running command (⌘.)")
+            }
+        }
+        .padding(16)
+    }
+
+    private var guideStrip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles").foregroundStyle(.tint)
+            Text(guideText).font(.callout)
+            Spacer()
+            if !store.lastResult.isEmpty {
+                Text(store.lastResult).font(.caption.bold())
+                    .foregroundStyle(store.lastResult.hasPrefix("✅") ? .green : .red)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.tint.opacity(0.08))
+    }
+
+    private var guideText: String {
+        if store.statusLine != "clean" { return "You have uncommitted changes — use Commit & Push, or Apply a delivery." }
+        return "Next: Apply a Claude delivery (drop the zip below), or Pull to get the latest."
+    }
+
+    private var actionGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
+            ActionButton("Pull latest", "arrow.down.circle", key: "l") { Task { await store.pull() } }
+            ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { importingZip = true }
+            ActionButton("Commit & Push", "arrow.up.circle", key: "p") { commitText = ""; sheet = .commit }
+            ActionButton("Switch branch", "arrow.left.arrow.right") { sheet = .switchBranch }
+            ActionButton("New branch", "plus.square.on.square", key: "n") { sheet = .newBranch }
+            ActionButton("Merge branch", "arrow.triangle.merge") { sheet = .merge }
+            ActionButton("Open in Xcode", "hammer", tint: .indigo, key: "o") { Task { await store.openXcode() } }
+            ActionButton("Deploy Worker", "cloud", tint: .teal) { Task { await store.deployWorker() } }
+            ActionButton("Doctor", "stethoscope", tint: .pink) { showDoctor = true }
+            ActionButton("Instructions", "book", tint: .orange) { showInstructions = true }
+            ActionButton("Options", "gearshape", tint: .gray, key: "," ) { showOptions = true }
+            ActionButton("Reveal in Finder", "folder") { store.revealInFinder() }
+            ActionButton("Refresh", "arrow.clockwise", key: "r") { Task { await store.refresh() } }
+        }
+    }
+
+    private var console: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Console").font(.caption.bold()).foregroundStyle(.secondary)
+                Spacer()
+                // Improvement #7 — search, copy, save.
+                TextField("Filter…", text: $consoleQuery)
+                    .textFieldStyle(.roundedBorder).frame(width: 140).font(.caption)
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(store.console, forType: .string)
+                }.buttonStyle(.borderless).font(.caption)
+                Button("Save") { store.saveConsole() }.buttonStyle(.borderless).font(.caption)
+                Button("Clear") { store.clearConsole() }.buttonStyle(.borderless).font(.caption)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(displayedConsole)
+                        .font(.system(.caption, design: store.settings.monospaceConsole ? .monospaced : .default))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .id("end")
+                }
+                .onChange(of: store.console) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+        }
+        .overlay(alignment: .center) {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 3)
+                    .overlay(Text("Drop delivery zip to preview").font(.title3.bold()))
+                    .padding(8)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
+            for prov in providers {
+                _ = prov.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, url.pathExtension.lowercased() == "zip" else { return }
+                    Task { @MainActor in beginPreview(url) }
+                }
+            }
+            return true
+        }
+    }
+
+    private var displayedConsole: String {
+        guard !consoleQuery.isEmpty else { return store.console }
+        let lines = store.console.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.range(of: consoleQuery, options: .caseInsensitive) != nil }
+        return lines.joined(separator: "\n")
+    }
+
+    // Improvement #4/#5 — preview a zip first, then let the user confirm.
+    // When "confirm before apply" is off in Options, skip the sheet and apply immediately.
+    private func beginPreview(_ url: URL) {
+        Task {
+            if let preview = await store.previewDelivery(zip: url) {
+                if store.settings.confirmBeforeApply {
+                    await MainActor.run {
+                        pendingPreview = preview
+                        sheet = .deliveryPreview
+                    }
+                } else {
+                    await store.commitDelivery(from: preview)
+                }
+            }
+        }
+    }
+}
+
+struct ActionButton: View {
+    let title: String; let icon: String; var tint: Color = .accentColor
+    var key: Character? = nil
+    let action: () -> Void
+    init(_ title: String, _ icon: String, tint: Color = .accentColor, key: Character? = nil, action: @escaping () -> Void) {
+        self.title = title; self.icon = icon; self.tint = tint; self.key = key; self.action = action
+    }
+    var body: some View {
+        let btn = Button(action: action) {
+            HStack {
+                Image(systemName: icon).foregroundStyle(tint).frame(width: 22)
+                Text(title)
+                Spacer()
+            }
+            .padding(.vertical, 10).padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        if let key {
+            btn.keyboardShortcut(KeyEquivalent(key), modifiers: [.command, .shift])
+        } else {
+            btn
+        }
+    }
+}
+
+// MARK: - Delivery preview sheet (improvement #4)
+
+struct DeliveryPreviewSheet: View {
+    @Environment(\.dismiss) var dismiss
+    let preview: Store.DeliveryPreview
+    let autoCommit: Bool
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Review delivery before applying").font(.title3.bold())
+            Text("These files will overlay your repo. A safety snapshot is taken automatically first.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            GroupBox("Files (\(preview.files.count))") {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if preview.files.isEmpty {
+                            Text("No files found in the drop.").foregroundStyle(.secondary)
+                        }
+                        ForEach(preview.files, id: \.self) { f in
+                            Text(f).font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }.padding(6)
+                }.frame(height: 140)
+            }
+
+            GroupBox("Commit message") {
+                ScrollView {
+                    Text(preview.commitMessage.isEmpty ? "(none — you'll commit manually)" : preview.commitMessage)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }.frame(height: 90)
+            }
+
+            // Safety + auto-commit banner.
+            if !preview.messageProblems.isEmpty {
+                Label("Commit message is shell-unsafe — it will be opened for manual review instead of auto-committing.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                ForEach(preview.messageProblems, id: \.self) { p in
+                    Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
+                }
+            } else if autoCommit && !preview.commitMessage.isEmpty {
+                Label("Auto-commit is ON — applying will commit & push automatically.",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.caption).foregroundStyle(.green)
+            } else {
+                Label("Auto-commit is OFF — you'll be shown the commit sheet after applying.",
+                      systemImage: "hand.raised.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            HStack {
+                if preview.hasCommitScript {
+                    Label("commit.sh bundled", systemImage: "terminal").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { onCancel(); dismiss() }
+                Button("Apply") { onApply(); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 560)
+    }
+}
+
+// MARK: - Sheets
+
+struct CommitSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @Binding var text: String
+    let onCommit: (String) -> Void
+
+    // Improvement #3 — live safety feedback in the commit sheet.
+    private var problems: [String] { CommitSafety.problems(in: text) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Commit & Push").font(.title3.bold())
+            Text("Commit message").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $text).frame(height: 120)
+                .font(.system(.body, design: .monospaced))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(problems.isEmpty ? Color.secondary.opacity(0.3) : .red))
+            if problems.isEmpty {
+                Label("SAFE for BuildBuddy commit", systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            } else {
+                Label("Unsafe characters — fix before pushing:", systemImage: "xmark.circle.fill")
+                    .font(.caption).foregroundStyle(.red)
+                ForEach(problems, id: \.self) { p in
+                    Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Commit & Push") { onCommit(text); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty || !problems.isEmpty)
+            }
+        }
+        .padding(20).frame(width: 480)
+    }
+}
+
+struct NewBranchSheet: View {
+    @Environment(\.dismiss) var dismiss
+    let branches: [String]
+    let onCreate: (String, String) -> Void
+    @State private var name = ""
+    @State private var base = "main"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("New branch").font(.title3.bold())
+            TextField("e.g. feature/widgets", text: $name)
+            Picker("From base", selection: $base) {
+                ForEach(branches.isEmpty ? ["main"] : branches, id: \.self) { Text($0) }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Create & Push") { onCreate(name, base); dismiss() }
+                    .keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20).frame(width: 420)
+    }
+}
+
+struct PickBranchSheet: View {
+    @Environment(\.dismiss) var dismiss
+    let title: String
+    let branches: [String]
+    let onPick: (String) -> Void
+    @State private var choice = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.title3.bold())
+            if branches.isEmpty {
+                Text("No branches found.").foregroundStyle(.secondary)
+            } else {
+                Picker("Branch", selection: $choice) {
+                    ForEach(branches, id: \.self) { Text($0) }
+                }.pickerStyle(.inline).frame(height: 180)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Go") { onPick(choice.isEmpty ? (branches.first ?? "") : choice); dismiss() }
+                    .keyboardShortcut(.defaultAction).disabled(branches.isEmpty)
+            }
+        }
+        .padding(20).frame(width: 420)
+        .onAppear { choice = branches.first ?? "" }
+    }
+}
+
+// MARK: - Options (Settings) — every toggle described to the user
+
+struct OptionsView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    private var s: SettingsStore { store.settings }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Options").font(.title2.bold())
+                Spacer()
+                Button("Reset to defaults") { store.settings.resetToDefaults() }
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+            Divider()
+            Form {
+                Section("Auto commit & push") {
+                    Toggle("Auto commit and push after applying a delivery", isOn: binding(\.autoCommitAndPush))
+                    Toggle("Push after commit (off = commit only)", isOn: binding(\.pushAfterCommit))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Default commit message (used when a drop has no COMMIT_MSG.txt)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextField("Default commit message", text: binding(\.defaultCommitMessage))
+                    }
+                }
+
+                Section("Downloads auto-detect") {
+                    Toggle("Watch the Downloads folder for matching delivery zips", isOn: binding(\.watchDownloads))
+                    Toggle("Auto-apply a found zip when auto-commit is on", isOn: binding(\.autoApplyFound))
+                    HStack {
+                        Text("Scan interval")
+                        Slider(value: binding(\.downloadsScanSeconds), in: 3...60, step: 1)
+                        Text("\(Int(s.downloadsScanSeconds))s").monospacedDigit().frame(width: 40)
+                    }
+                    Text("Matches a zip whose inner top folder equals the repo name, or whose filename contains the project name.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("Branch & pull") {
+                    HStack {
+                        Text("Default base branch")
+                        TextField("main", text: binding(\.defaultBranch)).frame(width: 160)
+                    }
+                    Toggle("Pull latest before applying a delivery", isOn: binding(\.autoPullBeforeApply))
+                    Toggle("Pull when I select a project", isOn: binding(\.autoPullOnSelect))
+                }
+
+                Section("Confirmations & safety") {
+                    Toggle("Show the preview sheet before applying (off = apply immediately)", isOn: binding(\.confirmBeforeApply))
+                    Toggle("Ask before pushing", isOn: binding(\.confirmBeforePush))
+                    Toggle("Block shell-unsafe commit messages (playbook rule)", isOn: binding(\.blockUnsafeCommitMessages))
+                    Toggle("Confirm before removing a project", isOn: binding(\.confirmBeforeRemoveProject))
+                    HStack {
+                        Text("Command timeout")
+                        Slider(value: binding(\.commandTimeoutSeconds), in: 10...600, step: 10)
+                        Text("\(Int(s.commandTimeoutSeconds))s").monospacedDigit().frame(width: 48)
+                    }
+                    Text("A command that exceeds the timeout is terminated, so the app can never hang.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("Workflow extras") {
+                    Toggle("Back up changed files before applying (undo point)", isOn: binding(\.backupBeforeApply))
+                    Toggle("Open in Xcode after a delivery is applied", isOn: binding(\.openXcodeAfterApply))
+                    Toggle("Deploy Worker after a successful push", isOn: binding(\.deployWorkerAfterPush))
+                    Toggle("Clear console at the start of each action", isOn: binding(\.clearConsoleOnAction))
+                    Toggle("Remember and reselect last project on launch", isOn: binding(\.rememberLastProject))
+                }
+
+                Section("Console & feedback") {
+                    Toggle("Verbose logging", isOn: binding(\.verboseLogging))
+                    Toggle("Monospace console font", isOn: binding(\.monospaceConsole))
+                    Toggle("Play a sound when a command finishes", isOn: binding(\.soundOnFinish))
+                    Toggle("Dry-run mode (print actions, never write/commit/push)", isOn: binding(\.dryRunMode))
+                        .help("Great for testing — shows exactly what BuildBuddy would do without touching anything.")
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    // Small helper to bridge SettingsStore @AppStorage to Toggle/TextField bindings.
+    private func binding<T>(_ keyPath: ReferenceWritableKeyPath<SettingsStore, T>) -> Binding<T> {
+        Binding(get: { store.settings[keyPath: keyPath] },
+                set: { store.settings[keyPath: keyPath] = $0 })
+    }
+}
+
+// MARK: - Instructions (improvement #2 — playbook shipped inside the app)
+
+struct InstructionsView: View {
+    @Environment(\.dismiss) var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("BuildBuddy Delivery Instructions").font(.title2.bold())
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+            Divider()
+            ScrollView {
+                Text(DeliveryInstructions.text)
+                    .font(.system(.body, design: .default))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+        }
+        .frame(width: 720, height: 620)
+    }
+}
+
+// The full playbook text, embedded so it travels with the app — no loose PDF required.
+enum DeliveryInstructions {
+    static let text: String = """
+BUILDBUDDY DELIVERY INSTRUCTIONS
+A reusable playbook for any project — how to package code drops so BuildBuddy applies, commits, and pushes them automatically.
+
+WHO THIS IS FOR
+Any chat or assistant preparing code changes delivered through BuildBuddy. It is project-agnostic: wherever you see a placeholder in ANGLE BRACKETS (e.g. <repo-root> or <branch>), substitute the value for the specific project. There are no version-number rules — versioning is each project's decision.
+
+1. WHAT BUILDBUDDY IS AND HOW IT APPLIES A DROP
+BuildBuddy takes a single zipped "drop" of changed files, overlays them onto a local git repo, then commits and pushes.
+
+The apply step:
+• Unzips the drop and looks for one top-level folder whose contents are repo-root-relative.
+• Overlays every file from that folder onto the repo using a copy/sync, excluding COMMIT_MSG.txt (and commit.sh).
+• Reads COMMIT_MSG.txt (if present) and uses its contents as the commit message.
+
+The commit step (read carefully):
+BuildBuddy builds its commit as a single shell command of the form:
+   git add -A && git commit -m "<contents of COMMIT_MSG.txt>" && git push origin "<branch>"
+It only escapes double-quotes in the message. Nothing else is escaped. That drives the most important rule (Section 3).
+
+2. DROP FORMAT (THE BUILDBUDDY v2 LAYOUT)
+Every drop is a zip with this exact shape:
+   <drop>.zip
+   └── <repo-root-folder>/        ← exactly ONE top folder
+       ├── COMMIT_MSG.txt          ← commit message, at the top-folder root
+       ├── commit.sh               ← auto commit+push helper (Section 4)
+       └── <path>/<to>/<file>      ← repo-root-relative paths, mirroring the repo
+
+Rules:
+• One top folder only; its name matches the repo's root folder.
+• Repo-relative paths — a file's path inside the top folder equals its path inside the repo.
+• COMMIT_MSG.txt sits at the top-folder root (not in subfolders).
+• Ship only genuinely-changed files. Overlaying a stale shared file silently reverts others' work.
+• No junk: exclude __MACOSX, .DS_Store, and dotfiles.
+
+Building the zip (from the folder containing the top folder):
+   zip -X -r "<drop>.zip" "<repo-root-folder>" -x ".*" -x "__MACOSX*" -x "*/.DS_Store"
+
+3. THE COMMIT-MESSAGE RULE (MOST IMPORTANT)
+Because BuildBuddy wraps the message in double-quotes and escapes nothing else, the message must contain NO shell metacharacters. Forbidden in COMMIT_MSG.txt:
+• ` (backtick) — runs as command substitution even inside double-quotes.
+• $( ) — command substitution.
+• $NAME / ${…} — variable expansion inside double-quotes.
+• " (double-quote) — closes the message string early.
+• \\ (backslash) — interacts badly with shell escaping.
+• * and ? — glob wildcards; can expand unexpectedly.
+• ... (triple dot) — has caused parse errors; write it out instead.
+
+Write messages in plain prose:
+• Describe flags/keys/ranges in words ("git commit dash m", "200 to 299", "notifInbox").
+• Plain ASCII only — no smart quotes, em-dashes, or box-drawing characters.
+• Structure with simple ALL-CAPS labels and blank lines, not markdown symbols.
+
+NOTE: This app now checks the message for you. The commit sheet shows SAFE / UNSAFE live, and an unsafe bundled message is opened for review instead of auto-committed.
+
+4. AUTOMATIC COMMIT AND PUSH
+Two ways to make commit+push automatic — use both for belt-and-suspenders.
+
+Option A — patch BuildBuddy to auto-commit on apply (DONE in this build):
+This version commits & pushes automatically at the end of apply when "Auto-commit" is ON for the project (toggle in the header) and the bundled message is SAFE.
+
+Option B — ship commit.sh in every drop (always include this):
+An executable commit.sh at the drop's top-folder root commits with "git commit -F COMMIT_MSG.txt", which reads the message verbatim so the shell never parses it. It works even if a message contains a risky character and whether or not BuildBuddy is patched:
+   ./commit.sh                         # commit only
+   ./commit.sh --push                  # commit, then push current branch
+   ./commit.sh --push origin <branch>  # commit, then push to a remote/branch
+
+5. VERIFICATION STANDARD (BEFORE EVERY DROP)
+• Parse every changed file with a real parser; zero new errors.
+• Balance braces, parentheses, brackets in each changed file.
+• Cross-reference audit: for any call/definition pair you touched, confirm BOTH ends exist.
+• Changed-files-only: diff against the base export; include exactly what changed.
+• Commit-message safety: it must say SAFE.
+
+6. AVOIDING THE MERGE-COLLISION TRAP (SHARED FILES)
+The biggest source of recurring "no member X" errors is shipping a full-file replacement of a shared file. Rules:
+• Build on the truth — start from a current export of the real repo, not an old snapshot.
+• Keep diffs additive on shared files; if you must regenerate one, make it the COMPLETE cumulative version.
+• One source of truth per rebuild — reconcile shared files so nothing from prior changes is missing.
+• Confirm an export is the live one by checking a known-present and a known-absent marker.
+
+7. WORKING STYLE FOR DELIVERIES
+• Deliver completed files only — no partial edits or train-of-thought in the drop.
+• Surgical changes — touch only what the task requires.
+• One folder, zipped, in the v2 layout.
+• Diagnose precisely — read the actual error and code before changing anything.
+• No version-number rules unless the project has its own convention.
+
+APPENDIX A — COMMIT-MESSAGE SAFETY CHECK (now built into this app)
+Flags: backtick, $( ) command substitution, $NAME/${…} expansion, double-quote, backslash. Must print SAFE before shipping.
+
+APPENDIX B — commit.sh
+Include at the drop's top-folder root. Stages everything and commits via "git commit -F COMMIT_MSG.txt" (verbatim), with an optional --push that sets upstream on first push.
+
+APPENDIX C — QUICK CHECKLIST
+□ Built from a CURRENT export of the real repo
+□ Only genuinely-changed files included
+□ Shared files edited additively
+□ Every changed file parses with zero new errors; braces balanced
+□ Cross-references checked (caller + definition both present)
+□ COMMIT_MSG.txt is plain prose and passes the safety check (SAFE)
+□ commit.sh included at the top-folder root
+□ Zipped in v2 layout (one top folder, repo-relative paths, no junk)
+□ Auto-commit ON (Option A) or commit.sh used (Option B)
+"""
+}
+
+// MARK: - Doctor
+
+struct DoctorView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var rows: [ToolRow] = []
+    @State private var working = false
+    @State private var ghAuth: String = "checking…"   // improvement #8
+
+    struct ToolRow: Identifiable { let id = UUID(); let name: String; let probe: String; var found: String? }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Doctor — dependencies").font(.title2.bold())
+            Text("Checks the tools BuildBuddy uses. Install the missing ones with one click (uses Homebrew / npm).")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach($rows) { $row in
+                HStack {
+                    Image(systemName: row.found != nil ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(row.found != nil ? .green : .red)
+                    Text(row.name).frame(width: 90, alignment: .leading)
+                    Text(row.found ?? "not found").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+
+            Divider()
+            // Improvement #8 — GitHub auth status + one-click login.
+            HStack(alignment: .top) {
+                Image(systemName: ghAuth.contains("Logged in") ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                    .foregroundStyle(ghAuth.contains("Logged in") ? .green : .orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("GitHub auth").fontWeight(.medium)
+                    Text(ghAuth).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                }
+                Spacer()
+                Button("gh auth login") { Task { await store.run("gh auth login --web -h github.com || gh auth login", cwd: nil, label: "gh auth login"); checkGhAuth() } }
+            }
+
+            HStack {
+                Button("Re-check") { check(); checkGhAuth() }
+                Button("Install missing") { Task { await installMissing() } }.disabled(working)
+                if working { ProgressView().scaleEffect(0.6) }
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 540)
+        .onAppear { check(); checkGhAuth() }
+    }
+
+    private func check() {
+        rows = [
+            .init(name: "git",      probe: "git --version"),
+            .init(name: "swift",    probe: "xcrun --find swiftc"),
+            .init(name: "gh",       probe: "gh --version"),
+            .init(name: "node",     probe: "node --version"),
+            .init(name: "wrangler", probe: "npx --yes wrangler --version"),
+            .init(name: "brew",     probe: "brew --version"),
+        ]
+        for i in rows.indices {
+            let r = store.syncShell(rows[i].probe, cwd: nil)
+            rows[i].found = r.code == 0 ? r.out.split(separator: "\n").first.map(String.init) : nil
+        }
+    }
+
+    private func checkGhAuth() {
+        let r = store.syncShell("gh auth status 2>&1 | head -n 3", cwd: nil)
+        let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.isEmpty {
+            ghAuth = "gh not installed — install it below, then sign in."
+        } else if out.localizedCaseInsensitiveContains("Logged in") {
+            ghAuth = "Logged in. " + (out.split(separator: "\n").first.map(String.init) ?? "")
+        } else {
+            ghAuth = "Not logged in. Click 'gh auth login' to sign in via browser."
+        }
+    }
+
+    private func installMissing() async {
+        working = true; defer { working = false }
+        if rows.first(where: { $0.name == "brew" })?.found == nil {
+            store.line("Homebrew isn't installed. Opening the official installer in Terminal — follow its prompts, then re-check.")
+            _ = await store.run("open -a Terminal", cwd: nil, label: "Open Terminal")
+            _ = await store.run("echo 'Run this in Terminal:  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"'", cwd: nil)
+            return
+        }
+        if rows.first(where: { $0.name == "gh" })?.found == nil {
+            _ = await store.run("brew install gh", cwd: nil, label: "Install gh")
+        }
+        if rows.first(where: { $0.name == "node" })?.found == nil {
+            _ = await store.run("brew install node", cwd: nil, label: "Install node")
+        }
+        check(); checkGhAuth()
+    }
+}

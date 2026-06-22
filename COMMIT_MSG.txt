@@ -1,0 +1,31 @@
+BuildBuddy v1.2 fix freeze on apply and add Options menu plus Downloads auto-detect
+
+WHY
+The app could hang during Apply delivery with no way to close it. The cause was the
+old safety snapshot that ran a git stash push followed by a git stash apply, which can
+stall or wait on input, parking the main thread with no cancel path.
+
+FREEZE FIX
+Every shell command is now cancellable with the Cancel button or command period, runs
+with interactive git and ssh prompts disabled so nothing can block on standard input,
+and is terminated after a configurable hard timeout. The git stash snapshot is replaced
+by a safe file copy backup that never touches the working tree state.
+
+OPTIONS MENU
+Adds a full Options window opened with command comma or the Options button, with about
+two dozen settings. These include a global auto commit and push switch, a default commit
+message, push after commit, confirmations, a command timeout, backups, auto pull, open
+in Xcode after apply, deploy worker after push, console preferences, a sound on finish,
+remember last project, and a dry run mode that prints actions without changing anything.
+
+DOWNLOADS AUTO DETECT
+BuildBuddy now watches the Downloads folder and matches a delivery zip to the selected
+project by its inner top folder name or by the file name containing the project name.
+When auto commit is on it applies the match automatically, otherwise it opens the preview.
+
+UPGRADE NOTE
+Because this drop replaces the app source, relaunch BuildBuddy after it applies so the
+launcher rebuilds from the new source.
+
+FILES CHANGED
+BuildBuddy.swift, README.md, IMPROVEMENTS.md, and Launch BuildBuddy.command.
