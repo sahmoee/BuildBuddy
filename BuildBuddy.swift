@@ -46,6 +46,51 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+// MARK: - Version & Changelog
+//
+// BuildBuddyVersion is the single source of truth for "what's running". Bump it every release
+// and add a matching entry at the TOP of BuildBuddyChangelog. The What's New sheet shows this,
+// and the app pops it automatically the first time a new version runs.
+
+let BuildBuddyVersion = "1.6"
+
+struct ChangelogEntry: Identifiable {
+    let id = UUID()
+    let version: String
+    let date: String
+    let highlights: [String]
+}
+
+let BuildBuddyChangelog: [ChangelogEntry] = [
+    ChangelogEntry(version: "1.6", date: "2026-06-22", highlights: [
+        "Self-update: a Check for Updates button pulls the latest BuildBuddy from GitHub and relaunches so it rebuilds — no more applying a drop to update the app itself.",
+        "Visible version number in the header and in Doctor, so you can always tell what is running.",
+        "What's New screen backed by a changelog that ships in the repo; it pops automatically after an update.",
+    ]),
+    ChangelogEntry(version: "1.5", date: "2026-06-22", highlights: [
+        "Fixed the empty preview box so deliveries actually apply: the preview sheet is now bound directly to its data, removing a SwiftUI state race that left the sheet blank with no Apply button.",
+    ]),
+    ChangelogEntry(version: "1.4", date: "2026-06-22", highlights: [
+        "Apply delivery and Add project now use the native open panel (the SwiftUI importer rendered blank in this unsigned app).",
+        "A commit on an already-clean tree no longer reports a confusing failure; it says nothing to commit instead.",
+        "The branch reader ignores permission and fatal messages so a folder error can no longer become the branch name.",
+    ]),
+    ChangelogEntry(version: "1.3", date: "2026-06-22", highlights: [
+        "Fixed a freeze when applying large deliveries: command output is now buffered and flushed a few times per second instead of once per line, the console is capped, and the preview unzip runs quietly.",
+    ]),
+    ChangelogEntry(version: "1.2", date: "2026-06-22", highlights: [
+        "Added an Options window (about two dozen settings) including a global auto commit and push switch and a default commit message.",
+        "Downloads auto-detect: watches the Downloads folder and matches a delivery zip to the selected project.",
+        "Replaced the fragile git-stash snapshot with a safe file-copy backup; added a command timeout and Cancel.",
+    ]),
+    ChangelogEntry(version: "1.1", date: "2026-06-21", highlights: [
+        "Auto-commit on apply, built-in delivery instructions, commit-message safety check, delivery preview, exit-code reporting, console search/copy/save, GitHub auth status in Doctor, keyboard shortcuts.",
+    ]),
+    ChangelogEntry(version: "1.0", date: "2026-06-21", highlights: [
+        "Initial BuildBuddy: per-project git loop (pull, commit and push, branch flows), apply Claude delivery zips, open in Xcode, deploy Cloudflare worker, Doctor dependency checks.",
+    ]),
+]
+
 // MARK: - Settings (Options menu, persisted to UserDefaults)
 //
 // Every option here is exposed in the Options window. They are intentionally plain
@@ -622,6 +667,84 @@ final class Store: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([p.url])
     }
 
+    // MARK: Self-update (so BuildBuddy can update itself instead of needing a drop)
+
+    @Published var updateStatus: String = ""
+    @Published var updateAvailable = false
+
+    // Find the folder that contains this app's own source. Prefers a project named
+    // "BuildBuddy"; otherwise asks the bundle where it lives and walks up to the repo root.
+    func locateSelfRepo() -> URL? {
+        if let p = projects.first(where: { $0.name.caseInsensitiveCompare("BuildBuddy") == .orderedSame }) {
+            return p.url
+        }
+        // The compiled app lives at <repo>/.build/BuildBuddy.app/Contents/MacOS/BuildBuddy.
+        // Walk up from the executable to find a folder containing BuildBuddy.swift.
+        var dir = URL(fileURLWithPath: Bundle.main.bundlePath)
+        for _ in 0..<6 {
+            dir.deleteLastPathComponent()
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("BuildBuddy.swift").path) {
+                return dir
+            }
+        }
+        return nil
+    }
+
+    // Pull the BuildBuddy repo and detect whether BuildBuddy.swift (the app's source) changed.
+    func checkForUpdates() async {
+        guard let repo = locateSelfRepo() else {
+            updateStatus = "Couldn't find the BuildBuddy repo. Add the BuildBuddy folder as a project, then try again."
+            line(updateStatus)
+            return
+        }
+        line("Checking for BuildBuddy updates in \(repo.path) …")
+        let before = syncShell("git rev-parse HEAD:BuildBuddy.swift 2>/dev/null", cwd: repo).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let branchName = syncShell("git rev-parse --abbrev-ref HEAD", cwd: repo).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeBranch = (branchName.isEmpty || branchName.contains(" ")) ? "master" : branchName
+        _ = await run("git pull --ff-only origin \(Sh.q(safeBranch))", cwd: repo, label: "Update check (pull)")
+        let after = syncShell("git rev-parse HEAD:BuildBuddy.swift 2>/dev/null", cwd: repo).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !before.isEmpty && !after.isEmpty && before != after {
+            updateAvailable = true
+            updateStatus = "Update downloaded. Click Update & Relaunch to rebuild."
+            line("⬆️ A newer BuildBuddy.swift was pulled. " + updateStatus)
+        } else {
+            updateAvailable = false
+            updateStatus = "BuildBuddy is up to date (v\(BuildBuddyVersion))."
+            line("✅ " + updateStatus)
+        }
+    }
+
+    // Relaunch via the launcher, which rebuilds because the source is now newer than the binary.
+    func updateAndRelaunch() async {
+        guard let repo = locateSelfRepo() else { line("Couldn't find the BuildBuddy repo."); return }
+        let launcher = repo.appendingPathComponent("Launch BuildBuddy.command")
+        guard FileManager.default.fileExists(atPath: launcher.path) else {
+            line("Couldn't find 'Launch BuildBuddy.command' in \(repo.path).")
+            return
+        }
+        line("Rebuilding and relaunching BuildBuddy …")
+        // Remove the stale built app so the launcher definitely rebuilds, then open the launcher
+        // and quit this instance a moment later.
+        _ = await run("rm -rf \(Sh.q(repo.appendingPathComponent(".build/BuildBuddy.app").path)); open \(Sh.q(launcher.path))",
+                      cwd: repo, label: "Relaunch")
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        await MainActor.run { NSApp.terminate(nil) }
+    }
+
+    // Show What's New automatically the first time a new version runs.
+    func shouldShowWhatsNew() -> Bool {
+        let key = "lastSeenVersion"
+        let last = UserDefaults.standard.string(forKey: key)
+        if last != BuildBuddyVersion {
+            UserDefaults.standard.set(BuildBuddyVersion, forKey: key)
+            return last != nil   // don't pop on the very first install, only after an update
+        }
+        return false
+    }
+
     // Improvement #7 — save the console transcript to a file.
     func saveConsole() {
         let panel = NSSavePanel()
@@ -636,7 +759,8 @@ final class Store: ObservableObject {
     // MARK: Apply a Claude delivery zip
 
     // Improvement #4 — inspect a delivery zip without touching the repo.
-    struct DeliveryPreview {
+    struct DeliveryPreview: Identifiable {
+        let id = UUID()
         var files: [String]
         var commitMessage: String
         var hasCommitScript: Bool
@@ -809,6 +933,8 @@ struct BuildBuddyApp: App {
                     .keyboardShortcut("r", modifiers: [.command])
                 Button("Cancel Running Command") { store.cancelRunning() }
                     .keyboardShortcut(".", modifiers: [.command])
+                Button("Check for Updates…") { Task { await store.checkForUpdates() } }
+                    .keyboardShortcut("u", modifiers: [.command])
             }
         }
         // Native Settings window (⌘,) holding the full Options panel.
@@ -825,6 +951,7 @@ struct ContentView: View {
     @State private var showDoctor = false
     @State private var showInstructions = false
     @State private var showOptions = false
+    @State private var showWhatsNew = false
     @State private var foundZip: URL?
 
     var body: some View {
@@ -835,15 +962,21 @@ struct ContentView: View {
             if store.selected == nil {
                 EmptyDetail(showInstructions: $showInstructions)
             } else {
-                DetailView(showDoctor: $showDoctor, showInstructions: $showInstructions, showOptions: $showOptions)
+                DetailView(showDoctor: $showDoctor, showInstructions: $showInstructions,
+                           showOptions: $showOptions, showWhatsNew: $showWhatsNew)
             }
         }
         .sheet(isPresented: $showDoctor) { DoctorView().environmentObject(store) }
         .sheet(isPresented: $showInstructions) { InstructionsView() }
         .sheet(isPresented: $showOptions) { OptionsView().environmentObject(store).frame(width: 600, height: 640) }
+        .sheet(isPresented: $showWhatsNew) { WhatsNewView().environmentObject(store) }
         // Downloads auto-detect — polls on the interval from Settings while a project is selected.
         .task(id: store.selectionID) { await watchDownloadsLoop() }
-        .onAppear { store.restoreLastSelectionIfEnabled() }
+        .onAppear {
+            store.restoreLastSelectionIfEnabled()
+            // Pop What's New automatically the first run after an update.
+            if store.shouldShowWhatsNew() { showWhatsNew = true }
+        }
     }
 
     // Polling loop (not a thread that can hang the UI). Honors watchDownloads + interval.
@@ -960,6 +1093,7 @@ struct DetailView: View {
     @Binding var showDoctor: Bool
     @Binding var showInstructions: Bool
     @Binding var showOptions: Bool
+    @Binding var showWhatsNew: Bool
 
     @State private var dropTargeted = false
     @State private var sheet: ActiveSheet?
@@ -994,13 +1128,18 @@ struct DetailView: View {
             case .merge:
                 PickBranchSheet(title: "Merge branch into \(store.branch)", branches: store.branches) { b in Task { await store.merge(b) } }
             case .deliveryPreview:
-                if let preview = pendingPreview {
-                    DeliveryPreviewSheet(preview: preview,
-                                         autoCommit: store.selected?.autoCommitOnApply ?? true,
-                                         onApply: { Task { await store.commitDelivery(from: preview); pendingPreview = nil } },
-                                         onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir); pendingPreview = nil })
-                }
+                EmptyView()   // delivery preview is presented via its own sheet below
             }
+        }
+        // IMPORTANT: the delivery preview is driven directly by the preview data, not by a
+        // separate enum flag. Presenting it from $sheet while the data lived in a different
+        // @State could race — the sheet would build before pendingPreview propagated and show
+        // an EMPTY box (the "blank dialog" you saw), so Apply never appeared and nothing applied.
+        .sheet(item: $pendingPreview) { preview in
+            DeliveryPreviewSheet(preview: preview,
+                                 autoCommit: store.selected?.autoCommitOnApply ?? true,
+                                 onApply: { Task { await store.commitDelivery(from: preview) } },
+                                 onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir) })
         }
         .onChange(of: store.pendingCommitMessage) { _, msg in
             if !msg.isEmpty { commitText = msg; sheet = .commit; store.pendingCommitMessage = "" }
@@ -1008,7 +1147,6 @@ struct DetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .bbShowPreview)) { note in
             if let preview = note.object as? Store.DeliveryPreview {
                 pendingPreview = preview
-                sheet = .deliveryPreview
             }
         }
     }
@@ -1016,7 +1154,19 @@ struct DetailView: View {
     private var header: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.selected?.name ?? "").font(.title2.bold())
+                HStack(spacing: 6) {
+                    Text(store.selected?.name ?? "").font(.title2.bold())
+                    // Version badge — click to open What's New. Always visible so you can tell
+                    // exactly which build is running.
+                    Button { showWhatsNew = true } label: {
+                        Text("v\(BuildBuddyVersion)")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.tint.opacity(0.15), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("BuildBuddy \(BuildBuddyVersion) — click for What's New & updates")
+                }
                 Text(store.selected?.path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
@@ -1078,6 +1228,7 @@ struct DetailView: View {
             ActionButton("Doctor", "stethoscope", tint: .pink) { showDoctor = true }
             ActionButton("Instructions", "book", tint: .orange) { showInstructions = true }
             ActionButton("Options", "gearshape", tint: .gray, key: "," ) { showOptions = true }
+            ActionButton("Check for Updates", "arrow.down.app", tint: .green) { showWhatsNew = true; Task { await store.checkForUpdates() } }
             ActionButton("Reveal in Finder", "folder") { store.revealInFinder() }
             ActionButton("Refresh", "arrow.clockwise", key: "r") { Task { await store.refresh() } }
         }
@@ -1160,10 +1311,9 @@ struct DetailView: View {
         Task {
             if let preview = await store.previewDelivery(zip: url) {
                 if store.settings.confirmBeforeApply {
-                    await MainActor.run {
-                        pendingPreview = preview
-                        sheet = .deliveryPreview
-                    }
+                    // Setting pendingPreview is enough — the sheet is bound to it directly,
+                    // so the data is always present when the sheet builds (no empty box).
+                    await MainActor.run { pendingPreview = preview }
                 } else {
                     await store.commitDelivery(from: preview)
                 }
@@ -1211,7 +1361,7 @@ struct DeliveryPreviewSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Review delivery before applying").font(.title3.bold())
-            Text("These files will overlay your repo. A safety snapshot is taken automatically first.")
+            Text("These files will overlay your repo. A backup of overwritten files is made automatically first.")
                 .font(.caption).foregroundStyle(.secondary)
 
             GroupBox("Files (\(preview.files.count))") {
@@ -1450,6 +1600,68 @@ struct OptionsView: View {
     }
 }
 
+// MARK: - What's New / Changelog
+
+struct WhatsNewView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("What's New in BuildBuddy").font(.title2.bold())
+                    Text("You're running v\(BuildBuddyVersion)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Check for Updates") { Task { await store.checkForUpdates() } }
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+            if !store.updateStatus.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: store.updateAvailable ? "arrow.down.circle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(store.updateAvailable ? .blue : .green)
+                    Text(store.updateStatus).font(.caption)
+                    Spacer()
+                    if store.updateAvailable {
+                        Button("Update & Relaunch") { Task { await store.updateAndRelaunch() } }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 8)
+            }
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(BuildBuddyChangelog) { entry in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text("v\(entry.version)").font(.headline)
+                                    .padding(.horizontal, 8).padding(.vertical, 2)
+                                    .background(entry.version == BuildBuddyVersion ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12),
+                                                in: Capsule())
+                                Text(entry.date).font(.caption).foregroundStyle(.secondary)
+                                if entry.version == BuildBuddyVersion {
+                                    Text("current").font(.caption2).foregroundStyle(.tint)
+                                }
+                            }
+                            ForEach(entry.highlights, id: \.self) { h in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("•").foregroundStyle(.secondary)
+                                    Text(h).font(.callout).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .frame(width: 640, height: 560)
+    }
+}
+
 // MARK: - Instructions (improvement #2 — playbook shipped inside the app)
 
 struct InstructionsView: View {
@@ -1597,7 +1809,11 @@ struct DoctorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Doctor — dependencies").font(.title2.bold())
+            HStack {
+                Text("Doctor — dependencies").font(.title2.bold())
+                Spacer()
+                Text("BuildBuddy v\(BuildBuddyVersion)").font(.caption).foregroundStyle(.secondary)
+            }
             Text("Checks the tools BuildBuddy uses. Install the missing ones with one click (uses Homebrew / npm).")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach($rows) { $row in
