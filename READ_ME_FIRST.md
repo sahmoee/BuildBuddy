@@ -1,32 +1,19 @@
-# BuildBuddy v1.3 — freeze fix (apply this directly, not through BuildBuddy)
+# Install BuildBuddy v1.6 (one time) — then it updates itself
 
-The freeze stops you from applying a fix *inside* BuildBuddy, so this installs it directly.
+This version adds **self-update** and a **changelog**, so after this you never hand-install
+again. Because the older apply flow was unreliable, install this one directly:
 
-## Easiest way (double-click)
-1. Force-quit the frozen BuildBuddy: press Option-Command-Escape, select BuildBuddy, Force Quit.
-   (Or in Terminal: `pkill -9 BuildBuddy`)
-2. Double-click **install_freezefix.command** in this folder.
-   It copies the fixed `BuildBuddy.swift` into `~/Documents/BuildBuddy`, commits, pushes, and
-   relaunches the app (which rebuilds from the new source).
-   - If your repo isn't at `~/Documents/BuildBuddy`, open the script and edit the `REPO=` line.
+## Easiest (double-click)
+1. Force-quit BuildBuddy: Option-Command-Escape → BuildBuddy → Force Quit (or `pkill -9 BuildBuddy`).
+2. Double-click **install_v1.6.command**. It copies v1.6 into `~/Documents/BuildBuddy`, commits,
+   pushes, rebuilds, and opens the app. (If your repo isn't there, edit the `REPO=` line.)
+3. The app opens showing **v1.6** next to the project name, and a What's New window.
 
-## Manual way (Terminal)
-```bash
-pkill -9 BuildBuddy 2>/dev/null
-cp "BuildBuddy.swift" ~/Documents/BuildBuddy/BuildBuddy.swift
-cp "Launch BuildBuddy.command" ~/Documents/BuildBuddy/"Launch BuildBuddy.command"
-cd ~/Documents/BuildBuddy
-git add -A
-git commit -m "BuildBuddy v1.3 fix freeze when applying large deliveries"
-git push origin master
-rm -rf .build/BuildBuddy.app
-open "Launch BuildBuddy.command"
-```
+## From now on
+- Click the **v1.6** badge (or **Check for Updates**, or ⌘U) → it pulls the latest BuildBuddy
+  from GitHub. If there's a new version it offers **Update & Relaunch**, which rebuilds.
+- I deliver future BuildBuddy updates by pushing to your `sahmoee/BuildBuddy` repo; you just
+  click Check for Updates.
 
-## What changed
-- Output is buffered and flushed ~8x/second instead of once per line, so a large delivery
-  (like Stocked's many files) no longer floods and freezes the main thread.
-- The console is capped to a recent window so it never rebuilds a huge string.
-- The preview unzip runs quietly (no line-per-file).
-
-After this, applying big deliveries through BuildBuddy will work normally.
+## How to tell what's running
+The version badge in the header always shows the current version. Doctor shows it too.
