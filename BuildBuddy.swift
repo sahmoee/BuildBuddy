@@ -636,8 +636,7 @@ final class Store: ObservableObject {
     // MARK: Apply a Claude delivery zip
 
     // Improvement #4 — inspect a delivery zip without touching the repo.
-    struct DeliveryPreview: Identifiable {
-        let id = UUID()
+    struct DeliveryPreview {
         var files: [String]
         var commitMessage: String
         var hasCommitScript: Bool
@@ -995,18 +994,13 @@ struct DetailView: View {
             case .merge:
                 PickBranchSheet(title: "Merge branch into \(store.branch)", branches: store.branches) { b in Task { await store.merge(b) } }
             case .deliveryPreview:
-                EmptyView()   // delivery preview is presented via its own sheet below
+                if let preview = pendingPreview {
+                    DeliveryPreviewSheet(preview: preview,
+                                         autoCommit: store.selected?.autoCommitOnApply ?? true,
+                                         onApply: { Task { await store.commitDelivery(from: preview); pendingPreview = nil } },
+                                         onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir); pendingPreview = nil })
+                }
             }
-        }
-        // IMPORTANT: the delivery preview is driven directly by the preview data, not by a
-        // separate enum flag. Presenting it from $sheet while the data lived in a different
-        // @State could race — the sheet would build before pendingPreview propagated and show
-        // an EMPTY box (the "blank dialog" you saw), so Apply never appeared and nothing applied.
-        .sheet(item: $pendingPreview) { preview in
-            DeliveryPreviewSheet(preview: preview,
-                                 autoCommit: store.selected?.autoCommitOnApply ?? true,
-                                 onApply: { Task { await store.commitDelivery(from: preview) } },
-                                 onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir) })
         }
         .onChange(of: store.pendingCommitMessage) { _, msg in
             if !msg.isEmpty { commitText = msg; sheet = .commit; store.pendingCommitMessage = "" }
@@ -1014,6 +1008,7 @@ struct DetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .bbShowPreview)) { note in
             if let preview = note.object as? Store.DeliveryPreview {
                 pendingPreview = preview
+                sheet = .deliveryPreview
             }
         }
     }
@@ -1165,9 +1160,10 @@ struct DetailView: View {
         Task {
             if let preview = await store.previewDelivery(zip: url) {
                 if store.settings.confirmBeforeApply {
-                    // Setting pendingPreview is enough — the sheet is bound to it directly,
-                    // so the data is always present when the sheet builds (no empty box).
-                    await MainActor.run { pendingPreview = preview }
+                    await MainActor.run {
+                        pendingPreview = preview
+                        sheet = .deliveryPreview
+                    }
                 } else {
                     await store.commitDelivery(from: preview)
                 }
@@ -1215,7 +1211,7 @@ struct DeliveryPreviewSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Review delivery before applying").font(.title3.bold())
-            Text("These files will overlay your repo. A backup of overwritten files is made automatically first.")
+            Text("These files will overlay your repo. A safety snapshot is taken automatically first.")
                 .font(.caption).foregroundStyle(.secondary)
 
             GroupBox("Files (\(preview.files.count))") {
