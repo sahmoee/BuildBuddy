@@ -3,6 +3,24 @@
 The in-app **What's New** screen (click the version badge, or Check for Updates) shows this
 same history. The running version is displayed next to the project name in the header.
 
+## v1.9 — 2026-06-24
+- **Much faster.** Git commands no longer launch a *login* shell (which re-read your entire
+  shell profile — nvm, pyenv, brew shellenv — on every call). They now use a non-login shell
+  with a pre-resolved PATH. Project status reads in a **single batched git command** and is
+  **cached per project**, so selecting a project you've seen before paints instantly.
+- **10 reliability improvements:** Refresh-all, ahead/behind vs origin in the header, a Fetch
+  button, Stash / Unstash, Discard-changes (guarded), Copy-current-SHA, Open-on-GitHub, a
+  per-action busy label (shows *what's* running), overlapping-action guarding, and a one-click
+  "grant folder access" helper.
+- **10 new features:** project **search** box, a multi-project **Dashboard**, a built-in
+  **Diff viewer** for pending changes, **recent-commit history**, a **Command palette** (⌘K),
+  **favorites/pinned** projects, per-project **notes**, **Commit-all-dirty-repos**, a quick
+  branch switcher, and a **menu-bar** quick-actions extra.
+
+## v1.8 — 2026-06-23
+- iPhone Remote (on-device agent, QR pairing), three reach options (LAN / Tailscale / GitHub
+  relay), and an SMB drop-folder that applies delivery zips dropped from the iPhone Files app.
+
 ## v1.7 — 2026-06-22
 - **No more re-applying:** BuildBuddy compares each file in a delivery against your repo and
   applies only the **new or changed** files, skipping identical ones.

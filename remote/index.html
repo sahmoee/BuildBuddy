@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Build Remote">
+<meta name="theme-color" content="#1A1712">
+<title>BuildBuddy Remote</title>
+<style>
+  :root{
+    --bg:#1A1712; --panel:#2D2C2A; --panel-2:#34322f; --line:#46423b;
+    --gold:#A27219; --green:#1E8032; --red:#B5483B; --tan:#C7AB81;
+    --white:#F5F2EB; --muted:#9c9486; --radius:16px; --tap:54px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{background:radial-gradient(120% 80% at 50% -10%,#241f19 0%,var(--bg) 60%) fixed,var(--bg);
+    color:var(--white);font:16px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+    padding:max(14px,env(safe-area-inset-top)) 14px calc(20px + env(safe-area-inset-bottom));-webkit-font-smoothing:antialiased}
+  .wrap{max-width:520px;margin:0 auto}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:6px 2px 16px}
+  .mark{font-weight:800;font-size:21px;letter-spacing:-.02em}
+  .mark .dot{color:var(--gold)}
+  .pill{font-size:12px;font-weight:600;color:var(--muted);border:1px solid var(--line);border-radius:999px;
+    padding:5px 11px;display:flex;align-items:center;gap:7px}
+  .pill .led{width:8px;height:8px;border-radius:50%;background:var(--muted);transition:.3s}
+  .pill.online .led{background:var(--green);box-shadow:0 0 10px 1px rgba(30,128,50,.7)}
+  .pill.offline .led{background:var(--red)}
+  .card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel-2) 100%);border:1px solid var(--line);
+    border-radius:var(--radius);padding:14px;margin-bottom:14px}
+  .card h2{margin:0 0 10px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--tan);font-weight:700}
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px 2px}
+  input,select{width:100%;height:var(--tap);background:var(--bg);color:var(--white);border:1px solid var(--line);
+    border-radius:12px;padding:0 14px;font-size:16px;outline:none;appearance:none;-webkit-appearance:none}
+  input:focus,select:focus{border-color:var(--gold)}
+  .row{display:flex;gap:10px}.row>*{flex:1;min-width:0}
+  .grow{margin-bottom:11px}
+  select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+    background-position:calc(100% - 18px) center,calc(100% - 13px) center;background-size:5px 5px,5px 5px;
+    background-repeat:no-repeat;padding-right:38px}
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{min-height:var(--tap);border:1px solid var(--line);border-radius:13px;background:var(--panel-2);
+    color:var(--white);font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px;
+    cursor:pointer;transition:transform .05s ease,filter .15s ease;padding:0 10px;text-align:center}
+  button:active{transform:scale(.97)}
+  button .ic{font-size:17px;line-height:1}
+  button.primary{background:var(--gold);border-color:var(--gold);color:#1c1407}
+  button.wide{grid-column:1 / -1}
+  button.ghost{background:transparent}
+  button[disabled]{opacity:.45;pointer-events:none}
+  .seg{display:flex;gap:6px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:4px;margin-bottom:11px}
+  .seg button{flex:1;min-height:42px;font-size:13px;border:none;background:transparent;border-radius:9px}
+  .seg button.on{background:var(--gold);color:#1c1407}
+  .seg button.dim{opacity:.4}
+  #status{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;margin:2px 2px 10px;min-height:22px}
+  .ok{color:var(--green)}.err{color:#e08379}.run{color:var(--tan)}
+  pre#log{margin:0;background:#0f0d0a;border:1px solid var(--line);border-radius:12px;padding:12px;
+    font:12.5px/1.5 ui-monospace,"SF Mono",Menlo,monospace;color:#cfc8ba;white-space:pre-wrap;word-break:break-word;
+    max-height:46vh;overflow:auto}
+  .hint{font-size:12.5px;color:var(--muted);margin:8px 2px 0;line-height:1.5}
+  a{color:var(--tan)}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--gold);
+    border-radius:50%;animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="mark">BuildBuddy<span class="dot">.</span> Remote</div>
+    <div id="conn" class="pill offline"><span class="led"></span><span id="connText">Not paired</span></div>
+  </header>
+
+  <!-- Connection -->
+  <section class="card" id="setupCard">
+    <h2>Mac connection</h2>
+
+    <label>Reach mode — tap to switch which address is used</label>
+    <div class="seg" id="modeSeg">
+      <button data-mode="LAN" class="on">LAN</button>
+      <button data-mode="Tailscale">Tailscale</button>
+      <button data-mode="Public">Public</button>
+    </div>
+
+    <div class="grow">
+      <label for="host">Mac address for this mode</label>
+      <input id="host" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.42:7842">
+    </div>
+    <div class="grow">
+      <label for="token">Pairing token</label>
+      <input id="token" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="paste the token, or scan the QR">
+    </div>
+    <div class="actions">
+      <button class="primary wide" id="connect"><span class="ic">⚡</span>Connect &amp; load projects</button>
+      <button class="ghost wide" id="tryAll"><span class="ic">🛰</span>Auto: try every saved mode</button>
+    </div>
+    <p class="hint">In BuildBuddy: header → <b>Remote</b> → turn it On, then scan the QR (it fills the
+      address + token for whichever mode you pick). You can save one address per mode and switch above.</p>
+  </section>
+
+  <!-- Project + actions -->
+  <section class="card" id="workCard" style="display:none">
+    <h2>Project</h2>
+    <div class="grow"><select id="project"></select></div>
+    <div id="status"><span class="run">Ready.</span></div>
+    <div class="actions">
+      <button id="a-status"><span class="ic">↻</span>Status</button>
+      <button id="a-pull"><span class="ic">⬇︎</span>Pull latest</button>
+      <button id="a-commit" class="primary wide"><span class="ic">⬆︎</span>Commit &amp; Push</button>
+      <button id="a-build"><span class="ic">▶</span>Build (sim)</button>
+      <button id="a-xcode"><span class="ic">⌥</span>Open in Xcode</button>
+      <button id="a-worker"><span class="ic">☁︎</span>Deploy Worker</button>
+      <button id="a-doctor"><span class="ic">✚</span>Doctor</button>
+    </div>
+    <div style="height:12px"></div>
+    <h2>Branch</h2>
+    <div class="row grow">
+      <input id="branchName" placeholder="feature/name" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <input id="baseName" placeholder="base (master)" autocapitalize="off" autocorrect="off" spellcheck="false" style="max-width:42%">
+    </div>
+    <div class="actions">
+      <button id="a-new"><span class="ic">＋</span>New branch</button>
+      <button id="a-switch"><span class="ic">⇄</span>Switch branch</button>
+      <button id="a-merge" class="wide ghost"><span class="ic">⌥</span>Merge branch → current</button>
+    </div>
+  </section>
+
+  <!-- Log -->
+  <section class="card" id="logCard" style="display:none">
+    <h2>Console</h2>
+    <pre id="log">—</pre>
+  </section>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const LS = window.localStorage;
+
+  // ── Per-mode address storage ──────────────────────────────────────────────
+  // Addresses are saved per reach mode so you can flip LAN ⇄ Tailscale ⇄ Public
+  // without retyping. The token is shared (the agent uses one token for all).
+  let mode = LS.getItem("bb_mode") || "LAN";
+  function hostKey(m){ return "bb_host_" + m; }
+  function loadModeFields(){
+    $("host").value = LS.getItem(hostKey(mode)) || "";
+    $("token").value = LS.getItem("bb_token") || "";
+  }
+  function paintSeg(){
+    document.querySelectorAll("#modeSeg button").forEach(b=>{
+      b.classList.toggle("on", b.dataset.mode===mode);
+    });
+  }
+  $("baseName").value = LS.getItem("bb_base") || "master";
+
+  function base(){
+    let h = $("host").value.trim().replace(/^https?:\/\//,"").replace(/\/+$/,"");
+    return "http://" + h;
+  }
+  function tok(){ return $("token").value.trim(); }
+
+  // ── Ingest a buddyremote://pair?host=..&token=.. URL (from the QR) ─────────
+  // iOS can't auto-open a custom scheme into a web app, so we also accept the
+  // pair string pasted into the address box; we parse it on Connect.
+  function ingestPairString(raw){
+    try{
+      let s = raw.trim();
+      if(s.indexOf("buddyremote://")===0 || s.indexOf("host=")>=0){
+        const qs = s.split("?")[1] || s;
+        const params = new URLSearchParams(qs);
+        const h = params.get("host"); const t = params.get("token");
+        if(h){ $("host").value = h; }
+        if(t){ $("token").value = t; LS.setItem("bb_token", t); }
+        return true;
+      }
+    }catch(e){}
+    return false;
+  }
+  // If the page was opened with a #buddyremote://... fragment, use it.
+  if(location.hash && location.hash.indexOf("buddyremote")>=0){
+    ingestPairString(decodeURIComponent(location.hash.slice(1)));
+  }
+
+  // ── Status / log helpers ──────────────────────────────────────────────────
+  function setStatus(kind,text,spin){
+    const cls = kind==="ok"?"ok":kind==="err"?"err":"run";
+    $("status").innerHTML = (spin?'<span class="spin"></span>':'<span class="'+cls+'">●</span>')+'<span class="'+cls+'">'+text+'</span>';
+  }
+  function setLog(t){ $("log").textContent = t&&t.length?t:"—"; $("logCard").style.display=""; }
+  function conn(state,text){ $("conn").className="pill "+state; $("connText").textContent=text; }
+
+  // ── Networking ─────────────────────────────────────────────────────────────
+  async function api(path,opts,overrideBase){
+    opts = opts||{};
+    const root = overrideBase || base();
+    const url = root + path + (path.indexOf("?")<0?"?":"&") + "token=" + encodeURIComponent(tok());
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 620000);
+    try{ const res = await fetch(url, Object.assign({signal:ctrl.signal},opts)); return await res.json(); }
+    finally{ clearTimeout(t); }
+  }
+
+  // ── Connect (one mode) ─────────────────────────────────────────────────────
+  async function connect(){
+    // Allow pasting the whole pair URL into the host box.
+    if(ingestPairString($("host").value)){ /* fields rewritten */ }
+    if(!$("host").value.trim()){ setStatus("err","Enter your Mac's address (or scan the QR)."); return; }
+    LS.setItem(hostKey(mode), $("host").value.trim());
+    LS.setItem("bb_token", tok());
+    LS.setItem("bb_mode", mode);
+    conn("offline","Connecting…");
+    try{
+      const data = await api("/projects",{method:"GET"});
+      if(!data.ok){ conn("offline","Pairing failed"); setStatus("err",data.error||"Bad token"); return; }
+      fillProjects(data.projects);
+      conn("online","Connected · "+mode);
+      $("workCard").style.display=""; reflectWorker();
+      setStatus("ok","Paired over "+mode+". Pick a project and tap an action.");
+    }catch(e){ conn("offline","Can't reach Mac"); setStatus("err","No response on "+mode+" — try another mode or Auto."); }
+  }
+
+  // ── Auto: try every saved mode until one answers ───────────────────────────
+  async function tryAll(){
+    const modes = ["LAN","Tailscale","Public"];
+    setStatus("run","Trying saved modes…",true);
+    for(const m of modes){
+      const h = LS.getItem(hostKey(m));
+      if(!h) continue;
+      const root = "http://" + h.replace(/^https?:\/\//,"").replace(/\/+$/,"");
+      try{
+        const data = await api("/projects",{method:"GET"}, root);
+        if(data.ok){
+          mode = m; LS.setItem("bb_mode",m); paintSeg(); loadModeFields();
+          $("host").value = h;
+          fillProjects(data.projects);
+          conn("online","Connected · "+m); $("workCard").style.display=""; reflectWorker();
+          setStatus("ok","Connected automatically over "+m+".");
+          return;
+        }
+      }catch(e){ /* try next */ }
+    }
+    conn("offline","No mode reachable");
+    setStatus("err","None of your saved modes answered. Check the agent is On.");
+  }
+
+  function fillProjects(list){
+    const sel=$("project"); sel.innerHTML="";
+    if(!list || !list.length){
+      const o=document.createElement("option"); o.textContent="No projects — add one in BuildBuddy"; o.disabled=true; sel.appendChild(o); return;
+    }
+    list.forEach(p=>{
+      const o=document.createElement("option");
+      o.value=p.id; o.textContent=p.name+(p.hasWorker?"  ☁︎":""); o.dataset.worker=p.hasWorker?"1":"";
+      sel.appendChild(o);
+    });
+    const last=LS.getItem("bb_proj"); if(last) sel.value=last;
+  }
+  function reflectWorker(){
+    const sel=$("project"); const opt=sel.options[sel.selectedIndex];
+    $("a-worker").disabled = !(opt && opt.dataset.worker==="1");
+  }
+
+  // ── Run an action ───────────────────────────────────────────────────────────
+  async function run(action,extra,label){
+    if($("conn").classList.contains("offline")){ setStatus("err","Connect first."); return; }
+    const sel=$("project");
+    const body = Object.assign({action:action, projectId: sel.value}, extra||{});
+    setStatus("run",(label||action)+"…",true);
+    try{
+      const data = await api("/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(data.error && !data.result){ setStatus("err",data.error); setLog(data.error); return; }
+      setStatus(data.ok?"ok":"err", data.result || (data.ok?"Done":"Failed"));
+      setLog(data.log || data.result || "");
+    }catch(e){ setStatus("err","Lost connection to Mac."); }
+  }
+
+  // ── Wire up ─────────────────────────────────────────────────────────────────
+  paintSeg(); loadModeFields();
+  document.querySelectorAll("#modeSeg button").forEach(b=>{
+    b.onclick = ()=>{ mode=b.dataset.mode; LS.setItem("bb_mode",mode); paintSeg(); loadModeFields();
+                      setStatus("run","Switched to "+mode+". Connect to use it."); };
+  });
+  $("connect").onclick = connect;
+  $("tryAll").onclick  = tryAll;
+  $("project").onchange = ()=>{ LS.setItem("bb_proj",$("project").value); reflectWorker(); };
+
+  $("a-status").onclick = ()=>run("status",null,"Checking status");
+  $("a-pull").onclick   = ()=>run("pull",null,"Pulling");
+  $("a-commit").onclick = ()=>{ const m=window.prompt("Commit message:","Update from phone"); if(m===null)return; run("commit_push",{message:m},"Committing & pushing"); };
+  $("a-build").onclick  = ()=>run("build_sim",null,"Building (sim)");
+  $("a-xcode").onclick  = ()=>run("open_xcode",null,"Opening Xcode");
+  $("a-worker").onclick = ()=>run("deploy_worker",null,"Deploying worker");
+  $("a-doctor").onclick = ()=>run("doctor",null,"Running Doctor");
+  $("a-new").onclick = ()=>{ const n=$("branchName").value.trim(); const b=$("baseName").value.trim()||"master";
+    if(!n){ setStatus("err","Enter a branch name."); return; } LS.setItem("bb_base",b); run("new_branch",{name:n,base:b},"Creating "+n); };
+  $("a-switch").onclick = ()=>{ const n=$("branchName").value.trim(); if(!n){ setStatus("err","Enter the branch to switch to."); return; } run("switch_branch",{name:n},"Switching to "+n); };
+  $("a-merge").onclick = ()=>{ const n=$("branchName").value.trim(); if(!n){ setStatus("err","Enter the branch to merge in."); return; } run("merge",{source:n},"Merging "+n); };
+
+  // Auto-connect if this mode already has saved creds.
+  if($("host").value.trim() && tok()) connect();
+})();
+</script>
+</body>
+</html>
