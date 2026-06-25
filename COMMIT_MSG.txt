@@ -1,22 +1,30 @@
-BuildBuddy v1.3 fix freeze when applying large deliveries
+BuildBuddy v1.9 faster git plus ten improvements and ten new features
 
-WHY
-Applying a delivery with many files could freeze the window with no way to close it.
-The console showed the unzip finishing and then the app hung. The cause was output
-flooding. The previous code hopped to the main thread once per output chunk and forced
-a full console re render each time, so a delivery with dozens of files spawned hundreds
-of updates and saturated the main thread.
+BUILD FIX
+Fixed two type errors in the favorite star color, where a Color and a hierarchical style were
+mixed in the same conditional. Both now use an explicit Color so the build succeeds.
 
-FIX
-Command output is now buffered on a background queue and flushed at most about eight
-times per second instead of once per chunk. The console is capped to a recent window so
-the text view never rebuilds an unbounded string. The preview unzip now runs in quiet
-mode so a large delivery does not print one line per file. Final output is flushed once
-the command exits, and the flush timer is always cancelled.
+PERFORMANCE
+Git commands no longer launch a login shell, which used to re-read the entire shell profile
+on every call. They now use a non login shell with a pre resolved PATH. Project status reads
+in a single batched git command and is cached per project, so reselecting a project paints
+instantly.
+
+TEN IMPROVEMENTS
+Refresh all projects at once, ahead and behind versus origin shown in the header, a Fetch
+button, Stash and Unstash, Discard changes with a confirmation, Copy current commit SHA, Open
+on GitHub, a per action busy label that shows what is running, guarding against overlapping
+actions, and a one click helper to grant folder access.
+
+TEN NEW FEATURES
+A project search box, a multi project dashboard, a built in diff viewer for pending changes,
+recent commit history, a command palette on command K, favorite or pinned projects, per
+project notes, commit all dirty repositories at once, a quick branch switcher, and a menu bar
+quick actions extra.
 
 NOTE
-Because this drop replaces the app source, relaunch BuildBuddy after applying so the
-launcher rebuilds from the new source.
+Because this drop replaces the app source, relaunch BuildBuddy after applying, or use Check
+for Updates once you are on a version that has it.
 
 FILES CHANGED
-BuildBuddy.swift and Launch BuildBuddy.command.
+BuildBuddy.swift, Launch BuildBuddy.command, and CHANGELOG.md.

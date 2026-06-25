@@ -1461,7 +1461,7 @@ struct Sidebar: View {
     @ViewBuilder private func row(_ p: Project) -> some View {
         HStack {
             Image(systemName: store.isFavorite(p) ? "star.fill" : "folder.fill")
-                .foregroundStyle(store.isFavorite(p) ? .yellow : .tint)
+                .foregroundStyle(store.isFavorite(p) ? Color.yellow : Color.accentColor)
             VStack(alignment: .leading, spacing: 1) {
                 Text(p.name).fontWeight(.medium)
                 Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -2534,7 +2534,7 @@ struct DashboardView: View {
                         let snap = store.dashboard[p.id]
                         HStack(spacing: 12) {
                             Image(systemName: store.isFavorite(p) ? "star.fill" : "folder")
-                                .foregroundStyle(store.isFavorite(p) ? .yellow : .tint)
+                                .foregroundStyle(store.isFavorite(p) ? Color.yellow : Color.accentColor)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(p.name).fontWeight(.medium)
                                 Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
