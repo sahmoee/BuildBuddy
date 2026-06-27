@@ -3,6 +3,24 @@
 The in-app **What's New** screen (click the version badge, or Check for Updates) shows this
 same history. The running version is displayed next to the project name in the header.
 
+## v1.10 — 2026-06-26
+- **Apply history & undo log.** Every applied delivery is recorded (files, commit SHA,
+  timestamp). Open **Apply history** to review them; one-click **Undo** restores the files a
+  delivery overwrote, from the backup taken at apply time.
+- **Scheduled auto-pull.** Optionally pull the selected project — or every project — on a timer.
+  It only fast-forwards and is skipped while another action is running.
+- **Multi-zip queue.** Drop several delivery zips on the console at once (or add them in the
+  **Delivery queue**) and apply them in sequence.
+- **UI/UX pass.** Sidebar status dots, a collapsible and drag-resizable console, toast
+  notifications, accent-color theming, grouped action buttons (Git / Delivery / Tools), a
+  colorized diff viewer, and a richer welcome screen.
+
+## v1.9.1 — 2026-06-25
+- **Auto-cleanup after a delivery.** Once a delivery actually applies, BuildBuddy deletes the
+  extracted temp folder **and** the original `.zip`. Skipped or already-applied deliveries keep
+  their zip so you can retry. Two options (both on by default) control this; dry-run never
+  deletes anything.
+
 ## v1.9 — 2026-06-24
 - **Much faster.** Git commands no longer launch a *login* shell (which re-read your entire
   shell profile — nvm, pyenv, brew shellenv — on every call). They now use a non-login shell

@@ -52,7 +52,7 @@ import UniformTypeIdentifiers
 // and add a matching entry at the TOP of BuildBuddyChangelog. The What's New sheet shows this,
 // and the app pops it automatically the first time a new version runs.
 
-let BuildBuddyVersion = "1.9"
+let BuildBuddyVersion = "1.10"
 
 struct ChangelogEntry: Identifiable {
     let id = UUID()
@@ -62,6 +62,16 @@ struct ChangelogEntry: Identifiable {
 }
 
 let BuildBuddyChangelog: [ChangelogEntry] = [
+    ChangelogEntry(version: "1.10", date: "2026-06-26", highlights: [
+        "Apply history & undo log: every applied delivery is recorded (files, commit SHA, timestamp). Open Apply history to review them and one-click Undo restores the files a delivery overwrote, from the backup taken at apply time.",
+        "Scheduled auto-pull: optionally pull the selected project (or every project) on a timer. It only fast-forwards and is skipped while another action runs.",
+        "Multi-zip queue: drop several delivery zips on the console at once (or add them in the Delivery queue) and apply them in sequence.",
+        "UI/UX pass: status dots in the sidebar, a collapsible and drag-resizable console, toast notifications, accent-color theming, grouped action buttons, colorized diff viewer, and a richer welcome screen.",
+    ]),
+    ChangelogEntry(version: "1.9.1", date: "2026-06-25", highlights: [
+        "Auto-cleanup after a delivery: once a delivery actually applies, BuildBuddy deletes the extracted temp folder AND the original .zip. Skipped or already-applied deliveries keep their zip so you can retry.",
+        "Two new options control this (both on by default): delete the original zip after a successful apply, and delete the extracted folder after applying. Dry-run mode never deletes anything.",
+    ]),
     ChangelogEntry(version: "1.9", date: "2026-06-24", highlights: [
         "Much faster: git commands no longer launch a login shell (which re-read your full shell profile every time). Project status now reads in a single batched command and is cached, so selecting a project paints instantly.",
         "10 reliability improvements: a 'Refresh all' that updates every project at once, ahead/behind vs origin in the header, a Fetch button, stash/unstash, discard-changes, copy-current-SHA, open-on-GitHub, a busy indicator per action, safer concurrent-action guarding, and a one-click 'grant folder access' helper.",
@@ -144,6 +154,11 @@ struct AppSettings {
     var confirmBeforeRemoveProject: Bool // guard the minus button
     var rememberLastProject: Bool        // reselect last project on launch
     var dryRunMode: Bool                 // print what WOULD happen, never write/commit/push
+    var deleteZipAfterApply: Bool        // delete the original delivery .zip after a successful apply
+    var deleteExtractedAfterApply: Bool  // delete the temp extracted folder after apply (always safe)
+    var scheduledAutoPull: Bool          // periodically pull on a timer
+    var autoPullMinutes: Double          // interval for scheduled auto-pull
+    var autoPullAllProjects: Bool        // pull every project (vs just the selected one)
 
     static let `default` = AppSettings(
         autoCommitAndPush: true,
@@ -168,7 +183,12 @@ struct AppSettings {
         soundOnFinish: false,
         confirmBeforeRemoveProject: true,
         rememberLastProject: true,
-        dryRunMode: false
+        dryRunMode: false,
+        deleteZipAfterApply: true,
+        deleteExtractedAfterApply: true,
+        scheduledAutoPull: false,
+        autoPullMinutes: 15,
+        autoPullAllProjects: false
     )
 }
 
@@ -201,6 +221,16 @@ final class SettingsStore: ObservableObject {
     @AppStorage("confirmBeforeRemoveProject") var confirmBeforeRemoveProject = AppSettings.default.confirmBeforeRemoveProject
     @AppStorage("rememberLastProject")      var rememberLastProject = AppSettings.default.rememberLastProject
     @AppStorage("dryRunMode")               var dryRunMode = AppSettings.default.dryRunMode
+    @AppStorage("deleteZipAfterApply")      var deleteZipAfterApply = AppSettings.default.deleteZipAfterApply
+    @AppStorage("deleteExtractedAfterApply") var deleteExtractedAfterApply = AppSettings.default.deleteExtractedAfterApply
+    @AppStorage("scheduledAutoPull")        var scheduledAutoPull = AppSettings.default.scheduledAutoPull
+    @AppStorage("autoPullMinutes")          var autoPullMinutes = AppSettings.default.autoPullMinutes
+    @AppStorage("autoPullAllProjects")      var autoPullAllProjects = AppSettings.default.autoPullAllProjects
+    // v1.10 UI: accent color theming + console height + collapse + grid grouping.
+    @AppStorage("accentChoice")             var accentChoice = "blue"
+    @AppStorage("consoleHeight")            var consoleHeight = 220.0
+    @AppStorage("consoleCollapsed")         var consoleCollapsed = false
+    @AppStorage("groupActionGrid")          var groupActionGrid = true
 
     func resetToDefaults() {
         let d = AppSettings.default
@@ -216,6 +246,24 @@ final class SettingsStore: ObservableObject {
         monospaceConsole = d.monospaceConsole; soundOnFinish = d.soundOnFinish
         confirmBeforeRemoveProject = d.confirmBeforeRemoveProject; rememberLastProject = d.rememberLastProject
         dryRunMode = d.dryRunMode
+        deleteZipAfterApply = d.deleteZipAfterApply; deleteExtractedAfterApply = d.deleteExtractedAfterApply
+        scheduledAutoPull = d.scheduledAutoPull; autoPullMinutes = d.autoPullMinutes
+        autoPullAllProjects = d.autoPullAllProjects
+        accentChoice = "blue"; consoleHeight = 220.0; consoleCollapsed = false; groupActionGrid = true
+    }
+
+    // Map the saved accent choice to a Color (v1.10 theming).
+    var accentColor: Color {
+        switch accentChoice {
+        case "purple": return .purple
+        case "pink": return .pink
+        case "green": return .green
+        case "orange": return .orange
+        case "red": return .red
+        case "teal": return .teal
+        case "indigo": return .indigo
+        default: return .blue
+        }
     }
 }
 
@@ -265,6 +313,35 @@ enum Persist {
     }
     static func save(_ list: [Project]) {
         if let data = try? JSONEncoder().encode(list) { try? data.write(to: file) }
+    }
+}
+
+// MARK: - Apply history (records every delivery applied, for the undo log)
+
+struct ApplyRecord: Identifiable, Codable {
+    var id = UUID()
+    var date: Date
+    var projectPath: String       // which repo it was applied to
+    var projectName: String
+    var fileCount: Int            // number of files changed
+    var files: [String]           // repo-relative paths that were applied
+    var commitMessage: String
+    var commitSHA: String?        // the resulting commit (if it was committed)
+    var backupDir: String?        // path to the file-copy backup, enabling undo
+    var zipName: String?          // original delivery zip filename (informational)
+}
+
+enum HistoryStore {
+    static var file: URL { Persist.dir.appendingPathComponent("apply_history.json") }
+    static func load() -> [ApplyRecord] {
+        guard let data = try? Data(contentsOf: file),
+              let list = try? JSONDecoder().decode([ApplyRecord].self, from: data) else { return [] }
+        return list
+    }
+    static func save(_ list: [ApplyRecord]) {
+        // Keep history bounded to the most recent 200 entries.
+        let trimmed = Array(list.suffix(200))
+        if let data = try? JSONEncoder().encode(trimmed) { try? data.write(to: file) }
     }
 }
 
@@ -354,6 +431,29 @@ final class Store: ObservableObject {
     @Published var canCancel = false              // drives the Cancel button in the UI
     private var currentProcess: Process?          // the live child process, so we can kill it
     @Published var seenDownloadZips: Set<String> = []   // de-dupe Downloads auto-detect
+
+    // v1.10 — apply history / undo log.
+    @Published var history: [ApplyRecord] = HistoryStore.load()
+
+    // v1.10 — toast notifications (auto-dismissing banners).
+    struct Toast: Identifiable { let id = UUID(); let text: String; let kind: Kind; enum Kind { case success, error, info } }
+    @Published var toasts: [Toast] = []
+    func toast(_ text: String, _ kind: Toast.Kind = .info) {
+        let t = Toast(text: text, kind: kind)
+        toasts.append(t)
+        // Auto-dismiss after 3.5s.
+        let id = t.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            self?.toasts.removeAll { $0.id == id }
+        }
+    }
+
+    // v1.10 — multi-zip queue: deliveries waiting to be applied in sequence.
+    @Published var zipQueue: [URL] = []
+    @Published var processingQueue = false
+
+    // v1.10 — scheduled auto-pull timer handle.
+    private var autoPullTimer: Timer?
 
     // PERF (v1.9): per-project status cache so re-selecting a project paints instantly while a
     // fresh read happens in the background. Keyed by project id; survives for the app session.
@@ -863,6 +963,115 @@ final class Store: ObservableObject {
     }
     func isFavorite(_ p: Project) -> Bool { favoriteIDs.contains(p.id.uuidString) }
 
+    // ════════════════════════════════════════════════════════════════════════════
+    // v1.10 — Apply history / undo log
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // Record an applied delivery. backupDir (if any) is what makes undo possible.
+    func recordApply(project: Project, files: [String], message: String, sha: String?, backupDir: URL?, zipName: String?) {
+        let rec = ApplyRecord(date: Date(),
+                              projectPath: project.path,
+                              projectName: project.name,
+                              fileCount: files.count,
+                              files: files,
+                              commitMessage: message,
+                              commitSHA: sha,
+                              backupDir: backupDir?.path,
+                              zipName: zipName)
+        history.append(rec)
+        HistoryStore.save(history)
+    }
+
+    // Undo a delivery by restoring the backup it made. If the apply was committed, this creates
+    // a NEW commit that reverts the files (we don't rewrite history). If the backup is gone, we
+    // explain rather than guess.
+    func undoApply(_ rec: ApplyRecord) async {
+        guard let backupPath = rec.backupDir, FileManager.default.fileExists(atPath: backupPath) else {
+            line("⚠️ No backup is available for this delivery — can't auto-undo. (Backups are made only when 'Back up before applying' is on, and may have been cleaned up.)")
+            toast("No backup to undo from", .error)
+            return
+        }
+        guard let p = projects.first(where: { $0.path == rec.projectPath }) else {
+            line("⚠️ The project for this history entry isn't in BuildBuddy anymore.")
+            return
+        }
+        line("Undoing delivery from \(DateFormatter.bbStamp.string(from: rec.date)) — restoring \(rec.fileCount) file(s) from backup…")
+        // Copy the backed-up files back over the repo.
+        _ = await run("/usr/bin/rsync -a \(Sh.q(backupPath))/ \(Sh.q(p.path))/", cwd: nil, label: "Restore backup")
+        await refresh()
+        toast("Restored \(rec.fileCount) file(s) from backup", .success)
+        line("✓ Restored. Review the changes and commit if you want to keep the revert.")
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        HistoryStore.save(history)
+        toast("History cleared", .info)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // v1.10 — Scheduled auto-pull
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // (Re)start or stop the auto-pull timer based on settings.
+    func configureAutoPull() {
+        autoPullTimer?.invalidate(); autoPullTimer = nil
+        guard settings.scheduledAutoPull, settings.autoPullMinutes > 0 else { return }
+        let interval = settings.autoPullMinutes * 60
+        autoPullTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.runScheduledPull() }
+        }
+        line("⏱️ Scheduled auto-pull every \(Int(settings.autoPullMinutes)) min is ON.")
+    }
+
+    private func runScheduledPull() async {
+        guard !busy else { return }   // don't interrupt an in-progress action
+        if settings.autoPullAllProjects {
+            for p in projects {
+                let br = await runQuiet("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd: p.url)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !br.isEmpty, !br.contains(" "), !br.lowercased().contains("fatal") else { continue }
+                _ = await run("git -C \(Sh.q(p.path)) pull --ff-only origin \(Sh.q(br)) 2>&1 | tail -1", cwd: nil, echo: false, label: "Auto-pull \(p.name)")
+            }
+            toast("Auto-pulled all projects", .info)
+        } else if selected != nil {
+            await pull()
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // v1.10 — Multi-zip queue (apply several deliveries in sequence)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    func enqueueZips(_ urls: [URL]) {
+        let zips = urls.filter { $0.pathExtension.lowercased() == "zip" }
+        guard !zips.isEmpty else { return }
+        zipQueue.append(contentsOf: zips)
+        line("➕ Queued \(zips.count) delivery zip(s). Total in queue: \(zipQueue.count).")
+        toast("Queued \(zips.count) delivery\(zips.count == 1 ? "" : "s")", .info)
+    }
+
+    // Process the queue one at a time, applying each through the normal apply flow.
+    func processZipQueue() async {
+        guard !processingQueue else { return }
+        guard selected != nil else { line("Select a project first, then process the queue."); toast("Select a project first", .error); return }
+        processingQueue = true
+        defer { processingQueue = false }
+        var applied = 0
+        while !zipQueue.isEmpty {
+            let zip = zipQueue.removeFirst()
+            line("\n— Queue: applying \(zip.lastPathComponent) (\(zipQueue.count) remaining) —")
+            if let preview = await previewDelivery(zip: zip) {
+                await commitDelivery(from: preview)
+                applied += 1
+            }
+        }
+        line("✓ Queue finished — processed \(applied) delivery/deliveries.")
+        toast("Queue done: \(applied) applied", .success)
+    }
+
+    func clearQueue() { zipQueue.removeAll(); toast("Queue cleared", .info) }
+
     // Improvement #3 — guard the commit message before running it. Returns false if blocked.
     @discardableResult
     func commitPush(message: String) async -> Bool {
@@ -1059,6 +1268,7 @@ final class Store: ObservableObject {
         var messageProblems: [String]
         var tmpDir: URL
         var sourceDir: String
+        var zipURL: URL?                  // the original delivery .zip, for post-apply cleanup
         // True when the drop adds/changes nothing — i.e. it's already been applied.
         var nothingToApply: Bool { changedFiles.isEmpty }
     }
@@ -1122,7 +1332,8 @@ final class Store: ObservableObject {
                                hasCommitScript: hasScript,
                                messageProblems: CommitSafety.problems(in: msg),
                                tmpDir: tmp,
-                               sourceDir: src)
+                               sourceDir: src,
+                               zipURL: zip)
     }
 
     // SAFE BACKUP (replaces the old git-stash snapshot, which was the freeze trigger).
@@ -1158,16 +1369,22 @@ final class Store: ObservableObject {
     // Applies an already-previewed delivery. Honors all global Settings as well as the
     // per-project auto-commit toggle and the commit-safety guard.
     func commitDelivery(from preview: DeliveryPreview) async {
-        guard let p = selected else { line("Select a project first."); return }
-        defer { try? FileManager.default.removeItem(at: preview.tmpDir) }
+        guard let p = selected else {
+            line("Select a project first.")
+            try? FileManager.default.removeItem(at: preview.tmpDir)
+            return
+        }
 
         if settings.clearConsoleOnAction { clearConsole() }
 
         // GUARD: don't re-apply files that are already identical in the repo. If the drop
         // contains nothing new or changed, skip the whole apply/commit — it's already applied.
+        // NOTE: we still clean up the temp extraction, but we KEEP the zip (nothing was applied,
+        // so the user may want it). Cleanup of the zip only happens on a real apply.
         if preview.nothingToApply {
             line("✓ Nothing to apply — all \(preview.files.count) file(s) in this delivery are already identical in \(p.name). Skipping.")
             lastResult = "✓ Already applied (no changes)"
+            cleanupDelivery(preview, deleteZip: false)
             return
         }
 
@@ -1181,7 +1398,7 @@ final class Store: ObservableObject {
             await pull()
         }
 
-        await backupBeforeApply(preview: preview)
+        let backupURL = await backupBeforeApply(preview: preview)
 
         // Overlay ONLY the changed files. We feed rsync an explicit include-from list so
         // unchanged files are never re-copied (and their mtimes aren't touched).
@@ -1201,17 +1418,24 @@ final class Store: ObservableObject {
         if dirty.isEmpty {
             line("✓ Repo already matches this delivery — nothing to commit.")
             lastResult = "✓ Already applied (no changes)"
+            cleanupDelivery(preview, deleteZip: false)
             return
         }
+
+        // The overlay succeeded and there are real changes — this counts as a successful apply,
+        // so the original zip is eligible for cleanup regardless of the commit path below.
+        cleanupDelivery(preview, deleteZip: true)
 
         // Decide commit behavior: global master switch AND per-project toggle must allow it.
         let autoOK = settings.autoCommitAndPush && p.autoCommitOnApply
         let msg = preview.commitMessage.isEmpty ? settings.defaultCommitMessage : preview.commitMessage
         let safe = CommitSafety.isSafe(msg) || !settings.blockUnsafeCommitMessages
 
+        var committed = false
         if autoOK && !msg.isEmpty && safe {
             line("Auto-commit \(settings.pushAfterCommit ? "& push " : "")is ON — committing…")
             _ = await commitPush(message: msg)
+            committed = true
             await maybePostApply()
         } else if autoOK && !msg.isEmpty && !safe {
             line("Auto-commit is ON, but the message is shell-unsafe — opening it for review instead.")
@@ -1220,6 +1444,47 @@ final class Store: ObservableObject {
             pendingCommitMessage = preview.commitMessage   // opens the review sheet
         } else {
             line("Applied. Auto-commit is off — review your changes, then Commit & Push.")
+        }
+
+        // v1.10 — record this apply in history (for the undo log). Capture the resulting SHA
+        // if it was committed; otherwise the entry is still useful (files + backup for undo).
+        var sha: String? = nil
+        if committed {
+            let s = (await runQuiet("git rev-parse HEAD 2>/dev/null", cwd: p.url)).trimmingCharacters(in: .whitespacesAndNewlines)
+            sha = s.isEmpty ? nil : s
+        }
+        recordApply(project: p, files: preview.changedFiles, message: msg, sha: sha,
+                    backupDir: backupURL, zipName: preview.zipURL?.lastPathComponent)
+        toast("Applied \(preview.changedFiles.count) file\(preview.changedFiles.count == 1 ? "" : "s") to \(p.name)", .success)
+    }
+
+    // Cleans up after a delivery: removes the temp extraction folder, and (when the delivery
+    // was actually applied AND the setting is on) deletes the original .zip too. Honors the
+    // deleteExtractedAfterApply / deleteZipAfterApply options. Never deletes anything in dry-run.
+    func cleanupDelivery(_ preview: DeliveryPreview, deleteZip: Bool) {
+        if settings.dryRunMode {
+            line("〰️ DRY RUN — would clean up the extracted folder" + (deleteZip ? " and the original zip." : "."))
+            return
+        }
+        let fm = FileManager.default
+        // 1) Temp extraction folder.
+        if settings.deleteExtractedAfterApply {
+            try? fm.removeItem(at: preview.tmpDir)
+        }
+        // 2) Original delivery zip — only on a real apply, only if enabled, and only if it's a
+        //    regular file we can resolve. We never touch anything outside a normal .zip path.
+        if deleteZip, settings.deleteZipAfterApply, let zip = preview.zipURL,
+           zip.pathExtension.lowercased() == "zip", fm.fileExists(atPath: zip.path) {
+            do {
+                try fm.removeItem(at: zip)
+                line("🧹 Cleaned up delivery: removed \(zip.lastPathComponent) and its extracted folder.")
+                // Forget it from the Downloads auto-detect set so a future same-named zip is seen.
+                seenDownloadZips.remove(zip.path)
+            } catch {
+                line("⚠️ Couldn't delete \(zip.lastPathComponent): \(error.localizedDescription)")
+            }
+        } else if settings.deleteExtractedAfterApply {
+            line("🧹 Removed the extracted delivery folder.")
         }
     }
 
@@ -1355,18 +1620,26 @@ struct ContentView: View {
                            showOptions: $showOptions, showWhatsNew: $showWhatsNew)
             }
         }
+        // [v1.10 UI] Toasts float above everything; accent theming applied app-wide.
+        .overlay { ToastOverlay().environmentObject(store) }
+        .tint(store.settings.accentColor)
         .sheet(isPresented: $showDoctor) { DoctorView().environmentObject(store) }
         .sheet(isPresented: $showInstructions) { InstructionsView() }
         .sheet(isPresented: $showOptions) { OptionsView().environmentObject(store).frame(width: 600, height: 640) }
         .sheet(isPresented: $showWhatsNew) { WhatsNewView().environmentObject(store) }
         .sheet(isPresented: $showRemote) { RemotePanelView().environmentObject(store).frame(width: 560, height: 720) }
         .onReceive(NotificationCenter.default.publisher(for: .bbShowRemote)) { _ in showRemote = true }
+        .onReceive(NotificationCenter.default.publisher(for: .bbAddProject)) { note in
+            if let url = note.object as? URL { store.addProject(at: url) }
+        }
         // Downloads auto-detect — polls on the interval from Settings while a project is selected.
         .task(id: store.selectionID) { await watchDownloadsLoop() }
         .onAppear {
             store.restoreLastSelectionIfEnabled()
             // Pop What's New automatically the first run after an update.
             if store.shouldShowWhatsNew() { showWhatsNew = true }
+            // Start the scheduled auto-pull timer if enabled.
+            store.configureAutoPull()
         }
     }
 
@@ -1400,6 +1673,8 @@ extension Notification.Name {
     static let bbShowPalette = Notification.Name("bbShowPalette")
     static let bbShowDashboard = Notification.Name("bbShowDashboard")
     static let bbShowCommitAll = Notification.Name("bbShowCommitAll")
+    static let bbAddProject = Notification.Name("bbAddProject")
+    static let bbShowRemote = Notification.Name("bbShowRemote")
 }
 
 // MARK: - Sidebar
@@ -1466,6 +1741,14 @@ struct Sidebar: View {
                 Text(p.name).fontWeight(.medium)
                 Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
+            Spacer()
+            // [v1.10 UI] status dot: green = clean, orange = uncommitted, gray = unknown.
+            // Populated by Refresh all / Dashboard; selected project also reflects live status.
+            if let snap = store.dashboard[p.id] {
+                Circle().fill(snap.dirty ? Color.orange : Color.green).frame(width: 8, height: 8)
+            } else if p.id == store.selectionID {
+                Circle().fill(store.statusLine == "clean" ? Color.green : Color.orange).frame(width: 8, height: 8)
+            }
         }
         .tag(p.id)
         .contextMenu {
@@ -1503,17 +1786,48 @@ struct Sidebar: View {
 struct EmptyDetail: View {
     @Binding var showInstructions: Bool
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "shippingbox").font(.system(size: 48)).foregroundStyle(.secondary)
-            Text("No project selected").font(.title2.bold())
-            Text("Drag a repo folder into the sidebar, or click + to add one.")
+        VStack(spacing: 16) {
+            Image(systemName: "shippingbox").font(.system(size: 52)).foregroundStyle(.tint)
+            Text("Welcome to BuildBuddy").font(.title.bold())
+            Text("A control panel for your git workflow across all your projects.")
                 .foregroundStyle(.secondary)
-            Button { showInstructions = true } label: {
-                Label("Read the delivery instructions", systemImage: "book")
+
+            VStack(alignment: .leading, spacing: 10) {
+                quickStep("1", "folder.badge.plus", "Add a project — drag a repo folder into the sidebar, or click the button below.")
+                quickStep("2", "tray.and.arrow.down", "Apply a delivery — drop a Claude zip on the console (or several to queue them).")
+                quickStep("3", "arrow.up.circle", "Commit & push, switch branches, view diffs — all from the buttons.")
             }
-            .buttonStyle(.bordered)
+            .padding(16)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: 460)
+
+            HStack(spacing: 12) {
+                Button { addProject() } label: { Label("Add your first project", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent)
+                Button { showInstructions = true } label: { Label("Read the instructions", systemImage: "book") }
+                    .buttonStyle(.bordered)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+
+    @ViewBuilder private func quickStep(_ n: String, _ icon: String, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(n).font(.caption.bold()).foregroundStyle(.white)
+                .frame(width: 22, height: 22).background(Circle().fill(Color.accentColor))
+            Image(systemName: icon).foregroundStyle(.tint).frame(width: 22)
+            Text(text).font(.callout).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func addProject() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a project repo folder"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            NotificationCenter.default.post(name: .bbAddProject, object: url)
+        }
     }
 }
 
@@ -1535,6 +1849,7 @@ struct DetailView: View {
     enum ActiveSheet: Identifiable {
         case commit, newBranch, switchBranch, merge, deliveryPreview
         case diff, history, dashboard, palette, notes, commitAll
+        case queue, applyHistory
         var id: Int { hashValue }
     }
 
@@ -1573,6 +1888,10 @@ struct DetailView: View {
                 NotesView().environmentObject(store)
             case .commitAll:
                 CommitAllView().environmentObject(store)
+            case .queue:
+                QueueView().environmentObject(store)
+            case .applyHistory:
+                ApplyHistoryView().environmentObject(store)
             }
         }
         // IMPORTANT: the delivery preview is driven directly by the preview data, not by a
@@ -1688,84 +2007,152 @@ struct DetailView: View {
     }
 
     private var actionGrid: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
-            ActionButton("Pull latest", "arrow.down.circle", key: "l") { Task { await store.pull() } }
-            ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { pickDeliveryZip() }
-            ActionButton("Commit & Push", "arrow.up.circle", key: "p") { commitText = ""; sheet = .commit }
-            ActionButton("Switch branch", "arrow.left.arrow.right") { sheet = .switchBranch }
-            ActionButton("New branch", "plus.square.on.square", key: "n") { sheet = .newBranch }
-            ActionButton("Merge branch", "arrow.triangle.merge") { sheet = .merge }
-            ActionButton("Open in Xcode", "hammer", tint: .indigo, key: "o") { Task { await store.openXcode() } }
-            ActionButton("Deploy Worker", "cloud", tint: .teal) { Task { await store.deployWorker() } }
-            // v1.9 improvements
-            ActionButton("Fetch", "arrow.down.left.circle", tint: .cyan) { Task { await store.fetch() } }
-            ActionButton("View Diff", "doc.text.magnifyingglass", tint: .purple, key: "i") { sheet = .diff }
-            ActionButton("History", "clock.arrow.circlepath", tint: .brown) { sheet = .history }
-            ActionButton("Stash", "tray.and.arrow.up", tint: .yellow) { Task { await store.stash() } }
-            ActionButton("Unstash", "tray.and.arrow.down.fill", tint: .yellow) { Task { await store.unstash() } }
-            ActionButton("Discard changes", "arrow.uturn.backward", tint: .red) { confirmDiscard() }
-            ActionButton("Copy SHA", "number", tint: .gray) { Task { await store.copyCurrentSHA() } }
-            ActionButton("Open on GitHub", "safari", tint: .blue) { Task { await store.openOnGitHub() } }
-            // v1.9 new features
-            ActionButton("Dashboard", "square.grid.2x2", tint: .indigo, key: "b") { sheet = .dashboard; Task { await store.refreshAll() } }
-            ActionButton("Refresh all", "arrow.clockwise.circle", tint: .green) { Task { await store.refreshAll() } }
-            ActionButton("Command palette", "command", tint: .pink, key: "k") { sheet = .palette }
-            ActionButton("Commit all dirty", "square.stack.3d.up", tint: .orange) { sheet = .commitAll }
-            ActionButton("Notes", "note.text", tint: .yellow) { sheet = .notes }
-            ActionButton("Doctor", "stethoscope", tint: .pink) { showDoctor = true }
-            ActionButton("Instructions", "book", tint: .orange) { showInstructions = true }
-            ActionButton("Options", "gearshape", tint: .gray, key: "," ) { showOptions = true }
-            ActionButton("Check for Updates", "arrow.down.app", tint: .green) { showWhatsNew = true; Task { await store.checkForUpdates() } }
-            ActionButton("Remote", "iphone.radiowaves.left.and.right", tint: .mint, key: "e") { NotificationCenter.default.post(name: .bbShowRemote, object: nil) }
-            ActionButton("Reveal in Finder", "folder") { store.revealInFinder() }
-            ActionButton("Refresh", "arrow.clockwise", key: "r") { Task { await store.refresh() } }
+        Group {
+            if store.settings.groupActionGrid {
+                VStack(alignment: .leading, spacing: 14) {
+                    actionSection("Git", gitButtons)
+                    actionSection("Delivery", deliveryButtons)
+                    actionSection("Tools", toolButtons)
+                }
+            } else {
+                LazyVGrid(columns: gridCols, spacing: 12) {
+                    gitButtons; deliveryButtons; toolButtons
+                }
+            }
         }
+    }
+
+    private var gridCols: [GridItem] { [GridItem(.adaptive(minimum: 170), spacing: 12)] }
+
+    @ViewBuilder private func actionSection(_ title: String, _ content: some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
+            LazyVGrid(columns: gridCols, spacing: 10) { content }
+        }
+    }
+
+    @ViewBuilder private var gitButtons: some View {
+        ActionButton("Pull latest", "arrow.down.circle", key: "l") { Task { await store.pull() } }
+        ActionButton("Commit & Push", "arrow.up.circle", key: "p") { commitText = ""; sheet = .commit }
+        ActionButton("Fetch", "arrow.down.left.circle", tint: .cyan) { Task { await store.fetch() } }
+        ActionButton("Switch branch", "arrow.left.arrow.right") { sheet = .switchBranch }
+        ActionButton("New branch", "plus.square.on.square", key: "n") { sheet = .newBranch }
+        ActionButton("Merge branch", "arrow.triangle.merge") { sheet = .merge }
+        ActionButton("View Diff", "doc.text.magnifyingglass", tint: .purple, key: "i") { sheet = .diff }
+        ActionButton("Commit history", "clock.arrow.circlepath", tint: .brown) { sheet = .history }
+        ActionButton("Stash", "tray.and.arrow.up", tint: .yellow) { Task { await store.stash() } }
+        ActionButton("Unstash", "tray.and.arrow.down.fill", tint: .yellow) { Task { await store.unstash() } }
+        ActionButton("Discard changes", "arrow.uturn.backward", tint: .red) { confirmDiscard() }
+        ActionButton("Copy SHA", "number", tint: .gray) { Task { await store.copyCurrentSHA() } }
+        ActionButton("Open on GitHub", "safari", tint: .blue) { Task { await store.openOnGitHub() } }
+    }
+
+    @ViewBuilder private var deliveryButtons: some View {
+        ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { pickDeliveryZip() }
+        ActionButton("Delivery queue", "square.stack.3d.down.right", tint: .blue) { sheet = .queue }
+        ActionButton("Apply history", "clock.badge.checkmark", tint: .brown) { sheet = .applyHistory }
+        ActionButton("Deploy Worker", "cloud", tint: .teal) { Task { await store.deployWorker() } }
+        ActionButton("Open in Xcode", "hammer", tint: .indigo, key: "o") { Task { await store.openXcode() } }
+    }
+
+    @ViewBuilder private var toolButtons: some View {
+        ActionButton("Dashboard", "square.grid.2x2", tint: .indigo, key: "b") { sheet = .dashboard; Task { await store.refreshAll() } }
+        ActionButton("Refresh all", "arrow.clockwise.circle", tint: .green) { Task { await store.refreshAll() } }
+        ActionButton("Command palette", "command", tint: .pink, key: "k") { sheet = .palette }
+        ActionButton("Commit all dirty", "square.stack.3d.up", tint: .orange) { sheet = .commitAll }
+        ActionButton("Notes", "note.text", tint: .yellow) { sheet = .notes }
+        ActionButton("Doctor", "stethoscope", tint: .pink) { showDoctor = true }
+        ActionButton("Instructions", "book", tint: .orange) { showInstructions = true }
+        ActionButton("Options", "gearshape", tint: .gray, key: "," ) { showOptions = true }
+        ActionButton("Check for Updates", "arrow.down.app", tint: .green) { showWhatsNew = true; Task { await store.checkForUpdates() } }
+        ActionButton("Remote", "iphone.radiowaves.left.and.right", tint: .mint, key: "e") { NotificationCenter.default.post(name: .bbShowRemote, object: nil) }
+        ActionButton("Reveal in Finder", "folder") { store.revealInFinder() }
+        ActionButton("Refresh", "arrow.clockwise", key: "r") { Task { await store.refresh() } }
     }
 
     private var console: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Resize handle (drag to change console height). Hidden when collapsed.
+            if !store.settings.consoleCollapsed {
+                ConsoleResizeHandle(height: Binding(
+                    get: { store.settings.consoleHeight },
+                    set: { store.settings.consoleHeight = min(600, max(120, $0)) }
+                ))
+            }
             HStack {
+                Button { store.settings.consoleCollapsed.toggle() } label: {
+                    Image(systemName: store.settings.consoleCollapsed ? "chevron.up" : "chevron.down")
+                }.buttonStyle(.borderless).help(store.settings.consoleCollapsed ? "Expand console" : "Collapse console")
                 Text("Console").font(.caption.bold()).foregroundStyle(.secondary)
+                if !store.zipQueue.isEmpty {
+                    Button { sheet = .queue } label: {
+                        Label("\(store.zipQueue.count) queued", systemImage: "square.stack.3d.down.right")
+                            .font(.caption2)
+                    }.buttonStyle(.borderless)
+                }
                 Spacer()
-                // Improvement #7 — search, copy, save.
-                TextField("Filter…", text: $consoleQuery)
-                    .textFieldStyle(.roundedBorder).frame(width: 140).font(.caption)
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(store.console, forType: .string)
-                }.buttonStyle(.borderless).font(.caption)
-                Button("Save") { store.saveConsole() }.buttonStyle(.borderless).font(.caption)
-                Button("Clear") { store.clearConsole() }.buttonStyle(.borderless).font(.caption)
+                if !store.settings.consoleCollapsed {
+                    TextField("Filter…", text: $consoleQuery)
+                        .textFieldStyle(.roundedBorder).frame(width: 140).font(.caption)
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(store.console, forType: .string)
+                    }.buttonStyle(.borderless).font(.caption)
+                    Button("Save") { store.saveConsole() }.buttonStyle(.borderless).font(.caption)
+                    Button("Clear") { store.clearConsole() }.buttonStyle(.borderless).font(.caption)
+                }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(displayedConsole)
-                        .font(.system(.caption, design: store.settings.monospaceConsole ? .monospaced : .default))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .id("end")
+            if !store.settings.consoleCollapsed {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(displayedConsole)
+                            .font(.system(.caption, design: store.settings.monospaceConsole ? .monospaced : .default))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(12)
+                            .id("end")
+                    }
+                    .onChange(of: store.console) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
                 }
-                .onChange(of: store.console) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                .frame(height: store.settings.consoleHeight)
+                .background(Color(nsColor: .textBackgroundColor))
             }
-            .background(Color(nsColor: .textBackgroundColor))
         }
         .overlay(alignment: .center) {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 3)
-                    .overlay(Text("Drop delivery zip to preview").font(.title3.bold()))
+                    .overlay(Text("Drop one or more delivery zips").font(.title3.bold()))
                     .padding(8)
             }
         }
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
-            for prov in providers {
-                _ = prov.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url, url.pathExtension.lowercased() == "zip" else { return }
-                    Task { @MainActor in beginPreview(url) }
+            handleConsoleDrop(providers); return true
+        }
+    }
+
+    // Multi-zip drop: 1 zip → preview & apply as before; 2+ zips → enqueue them.
+    private func handleConsoleDrop(_ providers: [NSItemProvider]) {
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+        for prov in providers {
+            group.enter()
+            _ = prov.loadObject(ofClass: URL.self) { url, _ in
+                if let url, url.pathExtension.lowercased() == "zip" {
+                    lock.lock(); urls.append(url); lock.unlock()
                 }
+                group.leave()
             }
-            return true
+        }
+        group.notify(queue: .main) {
+            guard !urls.isEmpty else { return }
+            if urls.count == 1 {
+                beginPreview(urls[0])
+            } else {
+                store.enqueueZips(urls)
+                sheet = .queue
+            }
         }
     }
 
@@ -2124,6 +2511,40 @@ struct OptionsView: View {
                     Toggle("Remember and reselect last project on launch", isOn: binding(\.rememberLastProject))
                 }
 
+                Section("Cleanup after applying a delivery") {
+                    Toggle("Delete the original .zip after a successful apply", isOn: binding(\.deleteZipAfterApply))
+                    Toggle("Delete the extracted folder after applying", isOn: binding(\.deleteExtractedAfterApply))
+                    Text("The zip is only deleted when a delivery actually applies — skipped or already-applied deliveries keep their zip so you can retry.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("Scheduled auto-pull") {
+                    Toggle("Periodically pull on a timer", isOn: Binding(
+                        get: { store.settings.scheduledAutoPull },
+                        set: { store.settings.scheduledAutoPull = $0; store.configureAutoPull() }))
+                    HStack {
+                        Text("Every")
+                        Stepper("\(Int(store.settings.autoPullMinutes)) min",
+                                value: Binding(get: { store.settings.autoPullMinutes },
+                                               set: { store.settings.autoPullMinutes = $0; store.configureAutoPull() }),
+                                in: 1...240, step: 1)
+                    }.disabled(!store.settings.scheduledAutoPull)
+                    Toggle("Pull every project (not just the selected one)", isOn: binding(\.autoPullAllProjects))
+                        .disabled(!store.settings.scheduledAutoPull)
+                    Text("Auto-pull is skipped while another action is running, and only fast-forwards.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("Appearance") {
+                    Picker("Accent color", selection: binding(\.accentChoice)) {
+                        Text("Blue").tag("blue"); Text("Purple").tag("purple"); Text("Pink").tag("pink")
+                        Text("Green").tag("green"); Text("Orange").tag("orange"); Text("Red").tag("red")
+                        Text("Teal").tag("teal"); Text("Indigo").tag("indigo")
+                    }
+                    Toggle("Group action buttons into sections (Git / Delivery / Tools)", isOn: binding(\.groupActionGrid))
+                    Toggle("Collapse the console", isOn: binding(\.consoleCollapsed))
+                }
+
                 Section("Console & feedback") {
                     Toggle("Verbose logging", isOn: binding(\.verboseLogging))
                     Toggle("Monospace console font", isOn: binding(\.monospaceConsole))
@@ -2459,16 +2880,38 @@ struct DiffView: View {
             }.padding(16)
             Divider()
             ScrollView {
-                Text(colorNote).font(.caption2).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 6)
-                Text(diff)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, raw in
+                        let s = String(raw)
+                        Text(s.isEmpty ? " " : s)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(diffColor(s))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .background(diffBackground(s))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.vertical, 8)
             }
         }
         .frame(width: 760, height: 620)
         .task { diff = await store.pendingDiff() }
+    }
+
+    // Color additions green, removals red, hunk headers cyan, file headers bold/secondary.
+    private func diffColor(_ s: String) -> Color {
+        if s.hasPrefix("+") && !s.hasPrefix("+++") { return .green }
+        if s.hasPrefix("-") && !s.hasPrefix("---") { return .red }
+        if s.hasPrefix("@@") { return .cyan }
+        if s.hasPrefix("diff ") || s.hasPrefix("+++") || s.hasPrefix("---") || s.hasPrefix("index ") { return .secondary }
+        return .primary
+    }
+    private func diffBackground(_ s: String) -> Color {
+        if s.hasPrefix("+") && !s.hasPrefix("+++") { return Color.green.opacity(0.08) }
+        if s.hasPrefix("-") && !s.hasPrefix("---") { return Color.red.opacity(0.08) }
+        return Color.clear
     }
     private var colorNote: String { "Lines starting with + are additions, - are removals." }
 }
@@ -2679,13 +3122,189 @@ struct CommitAllView: View {
     }
 }
 
+// [v1.10] Apply history / undo log — every delivery applied, with one-click restore-from-backup.
+struct ApplyHistoryView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
 
-// BuildBuddy starts/stops it, writes its config, reads its live state, and shows
-// a pairing QR. The agent and the app share BuildBuddy's project list, so a
-// project added here is instantly drivable from the phone.
-// ════════════════════════════════════════════════════════════════════════════
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Apply history").font(.title2.bold())
+                Spacer()
+                Button("Clear") { store.clearHistory() }.disabled(store.history.isEmpty)
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }.padding(16)
+            Divider()
+            if store.history.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock.badge.questionmark").font(.system(size: 40)).foregroundStyle(.secondary)
+                    Text("No deliveries applied yet.").foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // Newest first.
+                        ForEach(store.history.reversed()) { rec in
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 8) {
+                                        Text(rec.projectName).fontWeight(.semibold)
+                                        if let sha = rec.commitSHA {
+                                            Text(sha.prefix(8)).font(.caption.monospaced()).foregroundStyle(.tint)
+                                        }
+                                        Text(rec.date, style: .date).font(.caption2).foregroundStyle(.secondary)
+                                        Text(rec.date, style: .time).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    Text("\(rec.fileCount) file\(rec.fileCount == 1 ? "" : "s")\(rec.zipName.map { " · \($0)" } ?? "")")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                    Text(rec.commitMessage.split(separator: "\n").first.map(String.init) ?? "")
+                                        .font(.caption).lineLimit(1)
+                                }
+                                Spacer()
+                                if rec.backupDir != nil {
+                                    Button("Undo") { Task { await store.undoApply(rec) } }
+                                        .buttonStyle(.bordered).controlSize(.small)
+                                        .help("Restore the files this delivery overwrote, from the backup taken at apply time")
+                                } else {
+                                    Text("no backup").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 9)
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 720, height: 560)
+    }
+}
 
-extension Notification.Name { static let bbShowRemote = Notification.Name("bbShowRemote") }
+// [v1.10] Multi-zip queue — review queued deliveries and apply them in sequence.
+struct QueueView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Delivery queue").font(.title2.bold())
+                Spacer()
+                Button("Add zips…") { pickZips() }
+                Button("Clear") { store.clearQueue() }.disabled(store.zipQueue.isEmpty)
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+            }.padding(16)
+            Divider()
+            if store.zipQueue.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray").font(.system(size: 40)).foregroundStyle(.secondary)
+                    Text("Queue is empty. Add delivery zips, or drop several on the console at once.")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(store.zipQueue.enumerated()), id: \.offset) { idx, url in
+                            HStack(spacing: 10) {
+                                Text("\(idx + 1)").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 24)
+                                Image(systemName: "doc.zipper").foregroundStyle(.tint)
+                                Text(url.lastPathComponent).lineLimit(1)
+                                Spacer()
+                                Button { store.zipQueue.remove(at: idx) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            Divider()
+                        }
+                    }
+                }
+            }
+            Divider()
+            HStack {
+                Text("Applies to: \(store.selected?.name ?? "no project selected")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if store.processingQueue { ProgressView().scaleEffect(0.6) }
+                Button("Apply all in order") {
+                    dismiss(); Task { await store.processZipQueue() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.zipQueue.isEmpty || store.selected == nil || store.processingQueue)
+            }
+            .padding(16)
+        }
+        .frame(width: 640, height: 520)
+    }
+
+    private func pickZips() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        if panel.runModal() == .OK { store.enqueueZips(panel.urls) }
+    }
+}
+
+// [v1.10 UI] Drag handle to resize the console pane. Dragging up grows it, down shrinks it.
+struct ConsoleResizeHandle: View {
+    @Binding var height: Double
+    @State private var startHeight: Double? = nil
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color.secondary.opacity(0.001)).frame(height: 10)
+            RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.35))
+                .frame(width: 40, height: 4)
+        }
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    if startHeight == nil { startHeight = height }
+                    // Dragging up (negative translation) increases height.
+                    height = (startHeight ?? height) - value.translation.height
+                }
+                .onEnded { _ in startHeight = nil }
+        )
+    }
+}
+
+// [v1.10 UI] Toast overlay — brief auto-dismissing banners, stacked at the bottom.
+struct ToastOverlay: View {
+    @EnvironmentObject var store: Store
+    var body: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            ForEach(store.toasts) { t in
+                HStack(spacing: 8) {
+                    Image(systemName: icon(t.kind)).foregroundStyle(color(t.kind))
+                    Text(t.text).font(.callout)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().stroke(color(t.kind).opacity(0.4)))
+                .shadow(radius: 6, y: 2)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(.bottom, 18)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.toasts.count)
+        .allowsHitTesting(false)
+    }
+    private func icon(_ k: Store.Toast.Kind) -> String {
+        switch k { case .success: return "checkmark.circle.fill"; case .error: return "exclamationmark.triangle.fill"; case .info: return "info.circle.fill" }
+    }
+    private func color(_ k: Store.Toast.Kind) -> Color {
+        switch k { case .success: return .green; case .error: return .red; case .info: return .blue }
+    }
+}
+
+
 
 // Mirrors the agent's remote-config.json. Persisted to UserDefaults + written to
 // disk so the running agent (or next launch) picks it up.
