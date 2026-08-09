@@ -2,6 +2,23 @@
 .buildbuddy-backups/
 BuildBuddy.app/
 build.log
+
+# Local configuration and credentials — commit examples only.
+Secrets.xcconfig
+Secrets.local.xcconfig
+.env
+.env.*
+!.env.example
+.dev.vars
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+AuthKey_*.p8
+GoogleService-Info.plist
+
 .DS_Store
 ._*
 __MACOSX/
