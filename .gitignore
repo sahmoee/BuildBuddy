@@ -1,6 +1,9 @@
 .build/
 .buildbuddy-backups/
+BuildBuddy.app/
+build.log
 .DS_Store
+._*
 __MACOSX/
 *.swp
 .vscode/

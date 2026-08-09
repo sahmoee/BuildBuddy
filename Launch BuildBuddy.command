@@ -31,7 +31,7 @@ if [ -f "$BIN" ] && [ "$BIN" -nt "$SRC" ]; then need_build=0; fi
 if [ "$need_build" -eq 1 ]; then
   echo "Building $APP_NAME (first run or source changed)…"
   mkdir -p "$MACOS" "$APP/Contents/Resources"
-  if ! xcrun swiftc -O -parse-as-library "$SRC" -o "$BIN" 2>"$BUILD/build.log"; then
+  if ! xcrun swiftc -Onone -parse-as-library "$SRC" -o "$BIN" 2>"$BUILD/build.log"; then
     echo "❌ Build failed. Details:"
     cat "$BUILD/build.log"
     echo
@@ -48,8 +48,8 @@ if [ "$need_build" -eq 1 ]; then
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>com.sowens.buildbuddy</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
-  <key>CFBundleVersion</key><string>12</string>
-  <key>CFBundleShortVersionString</key><string>1.10</string>
+  <key>CFBundleVersion</key><string>21</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>

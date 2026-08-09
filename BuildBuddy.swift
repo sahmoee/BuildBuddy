@@ -1,58 +1,21 @@
-// BuildBuddy.swift — a native macOS control panel for your Xcode + GitHub + Cloudflare
-// workflow across multiple projects (Stocked, Atlas, The Sesh, …).
+// BuildBuddy.swift — v2.0 "Aurora" — a native macOS control panel for your
+// Xcode + GitHub workflow across multiple projects.
 //
-// It is a single-file SwiftUI app, compiled into a real .app by "Launch BuildBuddy.command".
-// Nothing here is project-specific: you add projects by dropping a folder or picking one.
-//
-// What it does, all via buttons:
-//   • Add projects (drag a repo folder in, or use the picker). Stored across launches.
-//   • Pull, Commit & Push, Switch / New / Merge branch — the whole git loop.
-//   • Apply a Claude delivery zip (drag it in or pick it) → overlays files at the correct
-//     paths, then commits (using the bundled COMMIT_MSG.txt) and pushes.
-//   • Open in Xcode.
-//   • Deploy the Cloudflare Worker (if the project has one).
-//   • Doctor: checks git / gh / node / wrangler / swift and installs the missing ones.
-// Every command it runs is printed to the console pane, so nothing is hidden.
-//
-// ── v1.1 improvements (see IMPROVEMENTS.md) ──────────────────────────────────
-// ── v1.2 changes ─────────────────────────────────────────────────────────────
-//  • FREEZE FIX: every shell command is now cancellable (⌘. or the Cancel button),
-//    runs with interactive git/ssh prompts disabled so nothing can block on stdin,
-//    and is killed after a configurable hard timeout. The old git-stash "snapshot"
-//    that caused the hang is replaced by a safe file-copy backup.
-//  • OPTIONS: a full Options/Settings window (⌘,) with ~24 settings, including a
-//    global "auto commit and push" switch and a default commit message.
-//  • DOWNLOADS AUTO-DETECT: watches ~/Downloads and matches a delivery zip to the
-//    selected project by inner top-folder name OR filename; auto-applies when
-//    auto-commit is on (otherwise opens the preview).
-//
-// ── v1.1 improvements (see IMPROVEMENTS.md) ──────────────────────────────────
-//  1. Auto-commit on apply (with a per-project toggle) — Option A from the playbook.
-//  2. Built-in delivery instructions (no loose PDF needed) — "Instructions" button.
-//  3. Commit-message safety check baked in (Section 3 of the playbook) with a preview
-//     sheet before anything is committed/pushed.
-//  4. Dry-run preview of a delivery zip before it touches your repo.
-//  5. Safe file-copy backup before applying a delivery (undo point) — see v1.2 note.
-//  6. Per-command exit-code reporting + a clear ✅/❌ result line (no silent failures).
-//  7. Console search, copy-all, and save-to-file.
-//  8. GitHub auth status surfaced in Doctor (gh auth status) + one-click `gh auth login`.
-//  9. Keyboard shortcuts for every primary action, and a persisted window-restoring guide.
-// 10. Safer shell quoting helper used everywhere, plus a "Reveal in Finder" and worker-path
-//     editor so misdetected worker folders can be fixed without re-adding the project.
-// ─────────────────────────────────────────────────────────────────────────────
+// Single-file SwiftUI app, compiled into a real .app by the build/launch commands.
+// v2.0 is a ground-up redesign: an all-new glass interface with fluid animations,
+// light & dark themes, project-scoped commits with automatic cache clearing,
+// a per-project Clean tool, and a Sync & Learn engine that snapshots every good
+// build so new files are never missed and regressions are caught before commit.
 
 import SwiftUI
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-// MARK: - Version & Changelog
-//
-// BuildBuddyVersion is the single source of truth for "what's running". Bump it every release
-// and add a matching entry at the TOP of BuildBuddyChangelog. The What's New sheet shows this,
-// and the app pops it automatically the first time a new version runs.
 
-let BuildBuddyVersion = "1.10"
+// ===== Models =====
+
+let BuildBuddyVersion = "2.0"
 
 struct ChangelogEntry: Identifiable {
     let id = UUID()
@@ -62,6 +25,62 @@ struct ChangelogEntry: Identifiable {
 }
 
 let BuildBuddyChangelog: [ChangelogEntry] = [
+    ChangelogEntry(version: "2.0", date: "2026-07-25", highlights: [
+        "Complete redesign - Aurora. Nothing looks the same: a new glass interface with a soft aurora backdrop, monogram project avatars, a redesigned flow card, tile actions with gentle hover lift, a refreshed console drawer, and smooth spring transitions throughout. Full light and dark themes with an in-app switcher, plus a Reduce motion option.",
+        "Project-scoped commits: BuildBuddy now verifies it is at the selected project's repo root before staging, and automatically excludes any other registered project nested inside it - files from other projects can never ride along in a commit.",
+        "Commits auto-clear caches: after every commit the project's status cache is invalidated and re-read fresh, stale delivery temp folders are removed, and old apply backups are pruned to the most recent ten.",
+        "New Clean Project tool: one click scans the selected project for build artifacts (.build, build, DerivedData, object files, logs, .DS_Store and friends) with a dry-run preview before anything is deleted. Clean folder, Clean Downloads and Clean build files all remain.",
+        "New Sync and Learn engine: BuildBuddy keeps a per-project manifest of every file. Sync scan surfaces new files and folders since the last good build so nothing is forgotten; the regression guard warns before a commit if previously present files went missing or a source file shrank drastically; and every successful commit teaches the baseline, so the app learns from each build.",
+        "Recipe Studio removed - BuildBuddy is 100 percent focused on the build workflow.",
+    ]),
+    ChangelogEntry(version: "1.19", date: "2026-07-16", highlights: [
+        "New Deploy website instructions: Instructions now has a third document, Deploy website, covering the whole path for a static site (like sowensstudios.com) from creating a GitHub repo, to connecting Netlify so pushes auto-publish, to pointing the domain and getting HTTPS — then the everyday update loop where BuildBuddy itself is the deploy button (edit files, click Next, the site goes live). Includes verification steps, troubleshooting, and quick checklists.",
+        "The new document is fully exportable: Copy and Save .md / .txt now include all three playbooks (Delivery format, Build & Version standard, and Deploy website).",
+        "No change to commit, apply, or push behavior — deploying a website is just BuildBuddy's normal commit-and-push against a Netlify-connected site repo, and this build documents how to set that up and use it.",
+    ]),
+    ChangelogEntry(version: "1.18", date: "2026-07-03", highlights: [
+        "Streamlined the main flow: the pop-up Commit and Commit & Push buttons are gone. Instead there's a single Next button beside the progress bar that does the next sensible thing — apply a detected delivery, then commit (and push if connected) — and shows Finished when there's nothing left to do.",
+        "The progress bar now lives in the footer beside Next and is always there while the console is collapsed, so you can see activity at a glance without opening the console.",
+        "New Clean Downloads button: erase the delivery zips (and their extracted folders) that pile up in your Downloads folder, with a choice of zips-only or zips-plus-folders.",
+        "New Check Stale Files scan: flags stale builds (compiled artifacts older than your latest source), duplicate filenames whose contents differ, and untracked files you may have missed — with a one-click commit for the untracked ones.",
+        "Continued the Apple-style refresh: refined the commit field and footer, cleaner cards and spacing throughout.",
+    ]),
+    ChangelogEntry(version: "1.17", date: "2026-06-29", highlights: [
+        "Offline and local-only repos are now first-class: local git (commit, branch, history, diff) always works, with no GitHub required. When a repo has no remote, BuildBuddy hides the push/pull actions and shows a Local only badge instead.",
+        "New Connect to GitHub helper: when a repo has no remote, a guided sheet walks you through connecting it — pick the GitHub CLI path (with Run for me buttons if gh is installed) or the browser path (open github.com/new, paste the URL, and BuildBuddy wires up the remote and first push). Every command is copyable if you'd rather run it yourself.",
+        "Refreshed, more elegant interface: redesigned action buttons with clearer icons and hover feedback, labelled categories (Git, Version & Build, Delivery, Tools), a translucent sidebar, and a header that shows at a glance whether you're connected to GitHub or working locally.",
+        "Better resizing: a smaller minimum window size, a resizable sidebar, and a scrollable main area so everything stays usable whether the window is large or small.",
+    ]),
+    ChangelogEntry(version: "1.16", date: "2026-06-28", highlights: [
+        "New Standardize this app button: detects how each app stores its version and build numbers (Xcode project settings, Info.plist, or both) and brings it onto the shared scheme in one click. It writes to every place the numbers live, and is smart enough to skip the reset if an app is already standardized — so it never wipes your progress.",
+        "Version and build changes now write to both the Xcode project (MARKETING_VERSION / CURRENT_PROJECT_VERSION) and the Info.plist (CFBundleShortVersionString / CFBundleVersion) when both exist, keeping every target and the in-app display in lockstep.",
+        "Every version or build change now records a timestamped What's New entry (MM:DD:YY HH:MM) automatically, prepended to the app's existing changelog (CHANGELOG.md, WHATS_NEW.md, or created if none exists).",
+        "Instructions updated with the dual-location rules, the timestamped changelog requirement, and a note reconciling the older per-app auto_increment_build / bump_version scripts.",
+    ]),
+    ChangelogEntry(version: "1.15", date: "2026-06-28", highlights: [
+        "Console is now hidden by default with a Show Console button, and a progress bar appears while work runs when the console is closed. Extended-use slowdowns are fixed: console output is tightly capped and trimmed cheaply so it never bogs the UI down.",
+        "New inline commit bar: an editable commit message that auto-fills from your changes, with separate Commit and Commit & Push buttons — no more typing a message every time.",
+        "Simplified the buttons: switch, new, and merge branch (plus copy SHA) are combined into one Branches sheet; a new Version & Build section bumps version or build with one click.",
+        "Standardized version and build numbering across all apps: CFBundleShortVersionString is the VERSION (small changes/fixes), CFBundleVersion is the BUILD (big features/changes). Bump either from BuildBuddy, reset any app to the 1.0 / build 1 baseline, and read the full standard in Instructions — which can now be exported as Markdown, plain text, or copied to the clipboard.",
+    ]),
+    ChangelogEntry(version: "1.14", date: "2026-06-27", highlights: [
+        "Back to a single self-hosted file: BuildBuddy is once again one BuildBuddy.swift compiled by the launcher script, dropping the Xcode project, Sparkle, code-signing and notarization ceremony. Simpler to host and update yourself.",
+        "Self-update restored to the git-pull + recompile flow: Check for Updates pulls the BuildBuddy repo, and Update & Relaunch rebuilds through the launcher because the source is now newer than the binary.",
+        "Slimmed down: removed the multi-project dashboard, command palette, per-project notes, favorites, the menu-bar extra, scheduled background auto-pull, the multi-zip queue, and stash/unstash — keeping BuildBuddy focused on git and applying deliveries. Everything core stays: clean folder, push recovery, pause-all-auto-push, folder monitoring, clean build files, apply history/undo, diff, commit history, and commit-all-dirty.",
+    ]),
+    ChangelogEntry(version: "1.13", date: "2026-06-27", highlights: [
+        "(Superseded) Briefly explored Sparkle auto-update and Direct Distribution for an Xcode build; reverted in 1.14 back to the single-file, self-hosted approach.",
+    ]),
+    ChangelogEntry(version: "1.12", date: "2026-06-27", highlights: [
+        "Removed the iPhone Remote feature entirely (the on-device agent, its scripts, and the in-app panel). This also removes the background process that was pushing concurrently and reverting the remote — the push-divergence problem is gone at the source.",
+        "New Clean folder action: wipe a designated folder completely, or delete only files matching a project's patterns, with a dry-run preview and a typed confirmation before anything is removed.",
+    ]),
+    ChangelogEntry(version: "1.11", date: "2026-06-27", highlights: [
+        "Push recovery: when a push is rejected as non-fast-forward, BuildBuddy now recovers automatically by fetching and force-pushing your local over the remote (force-with-lease, then a plain force if that reports stale info). Your local commits are never altered — only the remote is overwritten. Toggle it in Options under Pushing.",
+        "Pause all auto-push: a master switch that makes BuildBuddy commit locally but never touch the remote. Combined with removing the background Remote agent, this fixes the remote rolling back to older commits — there is now only one thing that ever pushes.",
+        "Folder monitoring: point BuildBuddy at extra folders to watch for delivery zips (besides Downloads), and at folders to scan for lingering build files.",
+        "Clean build files: a new action (and optional on-launch sweep) removes stale .build, build.log, old compiled app copies and similar from the app's parent folder, while never touching BuildBuddy.swift, the launcher, the running app, or git data.",
+    ]),
     ChangelogEntry(version: "1.10", date: "2026-06-26", highlights: [
         "Apply history & undo log: every applied delivery is recorded (files, commit SHA, timestamp). Open Apply history to review them and one-click Undo restores the files a delivery overwrote, from the backup taken at apply time.",
         "Scheduled auto-pull: optionally pull the selected project (or every project) on a timer. It only fast-forwards and is skipped while another action runs.",
@@ -88,7 +107,7 @@ let BuildBuddyChangelog: [ChangelogEntry] = [
         "The preview now labels each file NEW, CHG (changed), or unchanged, and the Apply button shows how many files will actually change.",
     ]),
     ChangelogEntry(version: "1.6", date: "2026-06-22", highlights: [
-        "Self-update: a Check for Updates button pulls the latest BuildBuddy from GitHub and relaunches so it rebuilds — no more applying a drop to update the app itself.",
+        "Self-update: a Check for Updates button pulls the latest BuildBuddy from GitHub and relaunches via the launcher so it rebuilds — no more applying a drop to update the app itself.",
         "Visible version number in the header and in Doctor, so you can always tell what is running.",
         "What's New screen backed by a changelog that ships in the repo; it pops automatically after an update.",
     ]),
@@ -115,7 +134,6 @@ let BuildBuddyChangelog: [ChangelogEntry] = [
         "Initial BuildBuddy: per-project git loop (pull, commit and push, branch flows), apply Claude delivery zips, open in Xcode, deploy Cloudflare worker, Doctor dependency checks.",
     ]),
 ]
-
 // MARK: - Settings (Options menu, persisted to UserDefaults)
 //
 // Every option here is exposed in the Options window. They are intentionally plain
@@ -156,9 +174,8 @@ struct AppSettings {
     var dryRunMode: Bool                 // print what WOULD happen, never write/commit/push
     var deleteZipAfterApply: Bool        // delete the original delivery .zip after a successful apply
     var deleteExtractedAfterApply: Bool  // delete the temp extracted folder after apply (always safe)
-    var scheduledAutoPull: Bool          // periodically pull on a timer
-    var autoPullMinutes: Double          // interval for scheduled auto-pull
-    var autoPullAllProjects: Bool        // pull every project (vs just the selected one)
+    var forcePushOnReject: Bool          // on non-ff rejection, fetch + force-with-lease (then --force)
+    var pauseAllAutoPush: Bool           // master kill switch: never auto-push anywhere
 
     static let `default` = AppSettings(
         autoCommitAndPush: true,
@@ -186,9 +203,8 @@ struct AppSettings {
         dryRunMode: false,
         deleteZipAfterApply: true,
         deleteExtractedAfterApply: true,
-        scheduledAutoPull: false,
-        autoPullMinutes: 15,
-        autoPullAllProjects: false
+        forcePushOnReject: true,
+        pauseAllAutoPush: false
     )
 }
 
@@ -223,14 +239,36 @@ final class SettingsStore: ObservableObject {
     @AppStorage("dryRunMode")               var dryRunMode = AppSettings.default.dryRunMode
     @AppStorage("deleteZipAfterApply")      var deleteZipAfterApply = AppSettings.default.deleteZipAfterApply
     @AppStorage("deleteExtractedAfterApply") var deleteExtractedAfterApply = AppSettings.default.deleteExtractedAfterApply
-    @AppStorage("scheduledAutoPull")        var scheduledAutoPull = AppSettings.default.scheduledAutoPull
-    @AppStorage("autoPullMinutes")          var autoPullMinutes = AppSettings.default.autoPullMinutes
-    @AppStorage("autoPullAllProjects")      var autoPullAllProjects = AppSettings.default.autoPullAllProjects
+    @AppStorage("forcePushOnReject")        var forcePushOnReject = AppSettings.default.forcePushOnReject
+    @AppStorage("pauseAllAutoPush")         var pauseAllAutoPush = AppSettings.default.pauseAllAutoPush
     // v1.10 UI: accent color theming + console height + collapse + grid grouping.
     @AppStorage("accentChoice")             var accentChoice = "blue"
     @AppStorage("consoleHeight")            var consoleHeight = 220.0
     @AppStorage("consoleCollapsed")         var consoleCollapsed = false
     @AppStorage("groupActionGrid")          var groupActionGrid = true
+    // v1.11 — folder monitoring + build cleanup.
+    // Newline-separated absolute paths BuildBuddy also scans for delivery zips (besides Downloads).
+    @AppStorage("extraWatchFolders")        var extraWatchFolders = ""
+    // Newline-separated folders to scan for lingering BuildBuddy build artifacts to clean.
+    // Defaults to the app's own parent folder at runtime if left blank.
+    @AppStorage("buildCleanupFolders")      var buildCleanupFolders = ""
+    @AppStorage("cleanBuildOnLaunch")       var cleanBuildOnLaunch = false
+    // v2.0 "Aurora" — appearance, motion, and the Sync & Learn engine.
+    @AppStorage("themeChoice")              var themeChoice = "system"   // system | light | dark
+    @AppStorage("reduceMotion")             var reduceMotion = false     // calm down all animations
+    @AppStorage("regressionGuard")          var regressionGuard = true   // warn before commit on missing/shrunk files
+    @AppStorage("autoLearnOnCommit")        var autoLearnOnCommit = true // update the project baseline after each commit
+    @AppStorage("syncScanOnSelect")         var syncScanOnSelect = true  // surface new files when selecting a project
+    @AppStorage("autoClearCachesOnCommit")  var autoClearCachesOnCommit = true // clear caches + prune backups after commit
+
+    // The app-wide color scheme override resolved from themeChoice.
+    var colorSchemeOverride: ColorScheme? {
+        switch themeChoice {
+        case "light": return .light
+        case "dark":  return .dark
+        default:      return nil
+        }
+    }
 
     func resetToDefaults() {
         let d = AppSettings.default
@@ -247,9 +285,11 @@ final class SettingsStore: ObservableObject {
         confirmBeforeRemoveProject = d.confirmBeforeRemoveProject; rememberLastProject = d.rememberLastProject
         dryRunMode = d.dryRunMode
         deleteZipAfterApply = d.deleteZipAfterApply; deleteExtractedAfterApply = d.deleteExtractedAfterApply
-        scheduledAutoPull = d.scheduledAutoPull; autoPullMinutes = d.autoPullMinutes
-        autoPullAllProjects = d.autoPullAllProjects
+        forcePushOnReject = d.forcePushOnReject; pauseAllAutoPush = d.pauseAllAutoPush
         accentChoice = "blue"; consoleHeight = 220.0; consoleCollapsed = false; groupActionGrid = true
+        themeChoice = "system"; reduceMotion = false
+        regressionGuard = true; autoLearnOnCommit = true; syncScanOnSelect = true
+        autoClearCachesOnCommit = true
     }
 
     // Map the saved accent choice to a Color (v1.10 theming).
@@ -413,7 +453,7 @@ enum CommitSafety {
     static func isSafe(_ message: String) -> Bool { problems(in: message).isEmpty }
 }
 
-// MARK: - Store
+// ===== Store =====
 
 @MainActor
 final class Store: ObservableObject {
@@ -424,6 +464,11 @@ final class Store: ObservableObject {
     @Published var branch: String = "—"
     @Published var branches: [String] = []
     @Published var statusLine: String = ""
+    // Offline/local support: whether the selected repo has an 'origin' remote, and its URL.
+    // When there's no remote, the UI hides push/pull-from-remote and offers a Connect helper.
+    @Published var hasRemote: Bool = true
+    @Published var remoteURL: String = ""
+    @Published var isGitRepo: Bool = true
     @Published var lastResult: String = ""        // improvement #6 — ✅/❌ summary line
 
     // Freeze-fix support.
@@ -431,6 +476,31 @@ final class Store: ObservableObject {
     @Published var canCancel = false              // drives the Cancel button in the UI
     private var currentProcess: Process?          // the live child process, so we can kill it
     @Published var seenDownloadZips: Set<String> = []   // de-dupe Downloads auto-detect
+
+    // ── "Next" workflow state ────────────────────────────────────────────────────
+    // Drives the single Next button next to the progress bar. Instead of separate popups, Next does
+    // the next sensible thing: apply a detected delivery, else commit (and push) pending changes,
+    // else report Finished.
+    enum NextStep: Equatable {
+        case applyDelivery(String)   // a delivery zip is ready to apply (filename shown)
+        case commit                  // uncommitted changes to commit (and push if remote)
+        case finished                // nothing to do
+        var title: String {
+            switch self {
+            case .applyDelivery(let name): return "Apply \(name)"
+            case .commit: return "Commit changes"
+            case .finished: return "Finished"
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .applyDelivery: return "tray.and.arrow.down.fill"
+            case .commit: return "checkmark.circle.fill"
+            case .finished: return "checkmark.seal.fill"
+            }
+        }
+    }
+    @Published var pendingDeliveryZip: URL? = nil    // a detected, not-yet-applied delivery
 
     // v1.10 — apply history / undo log.
     @Published var history: [ApplyRecord] = HistoryStore.load()
@@ -448,13 +518,6 @@ final class Store: ObservableObject {
         }
     }
 
-    // v1.10 — multi-zip queue: deliveries waiting to be applied in sequence.
-    @Published var zipQueue: [URL] = []
-    @Published var processingQueue = false
-
-    // v1.10 — scheduled auto-pull timer handle.
-    private var autoPullTimer: Timer?
-
     // PERF (v1.9): per-project status cache so re-selecting a project paints instantly while a
     // fresh read happens in the background. Keyed by project id; survives for the app session.
     struct CachedStatus { var branch: String; var branches: [String]; var statusLine: String }
@@ -462,15 +525,20 @@ final class Store: ObservableObject {
 
     var selected: Project? { projects.first { $0.id == selectionID } }
 
+    // Console performance: heavy/extended use used to get clunky because every git command
+    // appended to one ever-growing String that SwiftUI re-diffs and re-renders in full. We now
+    // (1) route ALL writes through one append, (2) keep a hard cap, and (3) trim using utf16
+    // count (cheap) instead of String.count (which walks grapheme clusters every time).
+    private let consoleHardCap = 40_000      // characters kept in the visible console
+    private let consoleTrimTo  = 30_000      // trim target when the cap is exceeded
+
     func append(_ s: String) {
         console += s
-        // FREEZE FIX (memory/render): keep the console bounded so SwiftUI never rebuilds an
-        // unbounded Text. Trim to the last ~120k characters when it grows past ~160k.
-        if console.count > 160_000 {
-            console = "…(earlier output trimmed)…\n" + String(console.suffix(120_000))
+        if console.utf16.count > consoleHardCap {
+            console = "…(earlier output trimmed)…\n" + String(console.suffix(consoleTrimTo))
         }
     }
-    func line(_ s: String)   { console += "\n\(s)\n" }
+    func line(_ s: String)   { append("\n\(s)\n") }   // route through the bounded append
     func clearConsole()      { console = "" }
 
     // Freeze-fix: kill whatever command is currently running.
@@ -720,6 +788,7 @@ final class Store: ObservableObject {
         echo '@@BB_BRANCH@@'; git rev-parse --abbrev-ref HEAD 2>&1; \
         echo '@@BB_BRANCHES@@'; git branch -a --format='%(refname:short)' 2>/dev/null; \
         echo '@@BB_STATUS@@'; git status --porcelain 2>/dev/null; \
+        echo '@@BB_REMOTE@@'; git remote get-url origin 2>/dev/null; \
         echo '@@BB_END@@'
         """
         let out = await runQuiet(combined, cwd: p.url)
@@ -746,8 +815,14 @@ final class Store: ObservableObject {
             .map { $0.replacingOccurrences(of: "origin/", with: "") }
             .filter { !$0.contains("HEAD") && !$0.lowercased().contains("fatal") })).sorted()
 
-        let st = section("@@BB_STATUS@@", "@@BB_END@@")
+        let st = section("@@BB_STATUS@@", "@@BB_REMOTE@@")
         statusLine = st.isEmpty ? "clean" : "uncommitted changes"
+
+        // Remote detection for offline/local support.
+        let rurl = section("@@BB_REMOTE@@", "@@BB_END@@").trimmingCharacters(in: .whitespacesAndNewlines)
+        remoteURL = rurl
+        hasRemote = !rurl.isEmpty && !rurl.lowercased().contains("fatal")
+        isGitRepo = !branch.contains("(no git)")
 
         // Update cache for instant future selections.
         Self.statusCache[pid] = CachedStatus(branch: branch, branches: branches, statusLine: statusLine)
@@ -777,47 +852,8 @@ final class Store: ObservableObject {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // v1.9 — 10 IMPROVEMENTS to existing features
+    // v1.9 — IMPROVEMENTS to existing features
     // ════════════════════════════════════════════════════════════════════════════
-
-    // [Improvement 1] Refresh ALL projects at once (updates dashboard/cache in parallel).
-    @Published var dashboard: [Project.ID: ProjectSnapshot] = [:]
-    struct ProjectSnapshot { var branch: String; var dirty: Bool; var ahead: Int; var behind: Int }
-
-    func refreshAll() async {
-        line("Refreshing all \(projects.count) projects…")
-        await withTaskGroup(of: (Project.ID, ProjectSnapshot).self) { group in
-            for p in projects {
-                group.addTask { (p.id, await self.snapshot(for: p)) }
-            }
-            for await (id, snap) in group {
-                dashboard[id] = snap
-            }
-        }
-        lastResult = "✅ Refreshed \(projects.count) projects"
-        line(lastResult)
-    }
-
-    // Read a compact snapshot for one project (used by dashboard + refreshAll).
-    func snapshot(for p: Project) async -> ProjectSnapshot {
-        let cmd = """
-        echo '@@B@@'; git rev-parse --abbrev-ref HEAD 2>/dev/null; \
-        echo '@@D@@'; git status --porcelain 2>/dev/null | head -1; \
-        echo '@@AB@@'; git rev-list --left-right --count @{upstream}...HEAD 2>/dev/null; \
-        echo '@@E@@'
-        """
-        let out = await runQuiet(cmd, cwd: p.url)
-        func sec(_ a: String, _ b: String) -> String {
-            guard let r1 = out.range(of: a), let r2 = out.range(of: b, range: r1.upperBound..<out.endIndex) else { return "" }
-            return String(out[r1.upperBound..<r2.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        let br = sec("@@B@@", "@@D@@")
-        let dirty = !sec("@@D@@", "@@AB@@").isEmpty
-        let ab = sec("@@AB@@", "@@E@@").split(whereSeparator: { $0 == " " || $0 == "\t" })
-        let behind = ab.count == 2 ? Int(ab[0]) ?? 0 : 0
-        let ahead = ab.count == 2 ? Int(ab[1]) ?? 0 : 0
-        return ProjectSnapshot(branch: br.isEmpty ? "—" : br, dirty: dirty, ahead: ahead, behind: behind)
-    }
 
     // [Improvement 2] Ahead/behind vs origin for the selected project, shown in the header.
     @Published var aheadBehind: (ahead: Int, behind: Int) = (0, 0)
@@ -834,19 +870,6 @@ final class Store: ObservableObject {
         guard let p = selected else { return }
         _ = await run("git fetch --all --prune", cwd: p.url, label: "Fetch")
         await refresh(); await updateAheadBehind()
-    }
-
-    // [Improvement 4] Stash / unstash the working tree.
-    func stash() async {
-        guard let p = selected else { return }
-        let label = "buildbuddy-" + DateFormatter.bbStamp.string(from: Date())
-        _ = await run("git stash push -u -m \(Sh.q(label))", cwd: p.url, label: "Stash")
-        await refresh()
-    }
-    func unstash() async {
-        guard let p = selected else { return }
-        _ = await run("git stash pop", cwd: p.url, label: "Unstash")
-        await refresh()
     }
 
     // [Improvement 5] Discard all uncommitted changes (with confirmation in the UI layer).
@@ -926,10 +949,6 @@ final class Store: ObservableObject {
         }
     }
 
-    // [New 7] Per-project notes, persisted to UserDefaults keyed by repo path.
-    func note(for p: Project) -> String { UserDefaults.standard.string(forKey: "note:\(p.path)") ?? "" }
-    func setNote(_ s: String, for p: Project) { UserDefaults.standard.set(s, forKey: "note:\(p.path)") }
-
     // [New 8] Commit & push EVERY dirty repo in one action.
     func commitAllDirty(message: String) async {
         let msg = message.isEmpty ? settings.defaultCommitMessage : message
@@ -940,28 +959,19 @@ final class Store: ObservableObject {
             guard dirty else { continue }
             line("• \(p.name): committing…")
             let safe = msg.replacingOccurrences(of: "\"", with: "\\\"")
-            _ = await run("git add -A && git commit -m \"\(safe)\" && (git push 2>/dev/null || true)", cwd: p.url, label: "Commit \(p.name)")
+            // v2.0 — the bulk commit uses the same project-scoped staging as a single commit,
+            // so nested sibling projects are excluded here too.
+            let c = await run(scopedStageAndCommitCommand(for: p, safeMessage: safe), cwd: p.url, label: "Commit \(p.name)")
+            if c.code == 0, !c.out.contains("BB_NOTHING_TO_COMMIT") {
+                let br = (await runQuiet("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd: p.url)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !br.isEmpty, !br.contains(" ") { await pushWithRecovery(branch: br, cwd: p.url) }
+                await postCommitMaintenance(for: p, committed: true)
+            }
             done += 1
         }
         lastResult = done == 0 ? "Nothing dirty to commit." : "✅ Committed \(done) repo(s)"
         line(lastResult)
     }
-
-    // [New 9] Quick branch switch by name (used by the quick switcher menu).
-    func quickSwitch(to name: String) async { await switchBranch(name) }
-
-    // [New 6] Favorites / pinned projects (ids persisted).
-    var favoriteIDs: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "favoriteProjectIDs") ?? []) }
-        set { UserDefaults.standard.set(Array(newValue), forKey: "favoriteProjectIDs") }
-    }
-    func toggleFavorite(_ p: Project) {
-        var f = favoriteIDs
-        if f.contains(p.id.uuidString) { f.remove(p.id.uuidString) } else { f.insert(p.id.uuidString) }
-        favoriteIDs = f
-        objectWillChange.send()
-    }
-    func isFavorite(_ p: Project) -> Bool { favoriteIDs.contains(p.id.uuidString) }
 
     // ════════════════════════════════════════════════════════════════════════════
     // v1.10 — Apply history / undo log
@@ -1013,68 +1023,675 @@ final class Store: ObservableObject {
     // v1.10 — Scheduled auto-pull
     // ════════════════════════════════════════════════════════════════════════════
 
-    // (Re)start or stop the auto-pull timer based on settings.
-    func configureAutoPull() {
-        autoPullTimer?.invalidate(); autoPullTimer = nil
-        guard settings.scheduledAutoPull, settings.autoPullMinutes > 0 else { return }
-        let interval = settings.autoPullMinutes * 60
-        autoPullTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.runScheduledPull() }
-        }
-        line("⏱️ Scheduled auto-pull every \(Int(settings.autoPullMinutes)) min is ON.")
+    // (Scheduled background auto-pull was removed — it was a background writer that could surprise
+    // you. Pull is now always user-initiated, plus the optional pull-before-apply / pull-on-select.)
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // v1.11 — Folder monitoring + lingering build-file cleanup
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // Parse a newline-separated list of folder paths into existing directory URLs.
+    static func folderList(_ raw: String) -> [URL] {
+        raw.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { ($0 as NSString).expandingTildeInPath }
+            .filter { var isDir: ObjCBool = false; return FileManager.default.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue }
+            .map { URL(fileURLWithPath: $0) }
     }
 
-    private func runScheduledPull() async {
-        guard !busy else { return }   // don't interrupt an in-progress action
-        if settings.autoPullAllProjects {
-            for p in projects {
-                let br = await runQuiet("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd: p.url)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !br.isEmpty, !br.contains(" "), !br.lowercased().contains("fatal") else { continue }
-                _ = await run("git -C \(Sh.q(p.path)) pull --ff-only origin \(Sh.q(br)) 2>&1 | tail -1", cwd: nil, echo: false, label: "Auto-pull \(p.name)")
-            }
-            toast("Auto-pulled all projects", .info)
-        } else if selected != nil {
-            await pull()
+    // The folders BuildBuddy scans for delivery zips: always Downloads, plus any extras.
+    var watchFolders: [URL] {
+        var dirs = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+        dirs.append(contentsOf: Self.folderList(settings.extraWatchFolders))
+        return dirs
+    }
+
+    // The app's own parent folder (where BuildBuddy.swift / the .app / .build live).
+    var appParentFolder: URL {
+        // Bundle path → .app's parent; in dev the source dir. Fall back to ~/Documents/BuildBuddy.
+        if let bundleParent = Bundle.main.bundleURL.deletingLastPathComponent() as URL?,
+           FileManager.default.fileExists(atPath: bundleParent.path) {
+            return bundleParent
         }
+        return URL(fileURLWithPath: ("~/Documents/BuildBuddy" as NSString).expandingTildeInPath)
+    }
+
+    // Names/patterns considered "lingering BuildBuddy build artifacts" — safe to remove.
+    // These are produced by the launcher's compile step and by stale app copies, NOT source.
+    private static let buildArtifactNames: Set<String> = [
+        ".build", "build.log", "BuildBuddy.dSYM", ".DS_Store"
+    ]
+    private static let buildArtifactSuffixes = [".o", ".swiftmodule", ".swiftdoc"]
+
+    // Scan the configured cleanup folders (or the app's parent by default) and remove lingering
+    // build artifacts. NEVER deletes BuildBuddy.swift, the launcher, the running .app, or git data.
+    @discardableResult
+    func cleanLingeringBuildFiles(dryRun: Bool = false) async -> Int {
+        let folders = settings.buildCleanupFolders.isEmpty ? [appParentFolder] : Self.folderList(settings.buildCleanupFolders)
+        let runningAppPath = Bundle.main.bundleURL.path
+        var removed = 0
+        let fm = FileManager.default
+        line("🧹 Scanning \(folders.count) folder(s) for lingering BuildBuddy build files…")
+        for folder in folders {
+            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for item in items {
+                let name = item.lastPathComponent
+                // Protect critical files no matter what.
+                if name == "BuildBuddy.swift" || name.hasSuffix(".command") || name == ".git" { continue }
+                if item.path == runningAppPath { continue }   // never delete the running app
+
+                let isArtifactName = Self.buildArtifactNames.contains(name)
+                let isArtifactSuffix = Self.buildArtifactSuffixes.contains { name.hasSuffix($0) }
+                // Stale compiled app copies: a *.app that isn't the one currently running.
+                let isStaleApp = name.hasSuffix(".app") && item.path != runningAppPath && name.contains("BuildBuddy")
+
+                guard isArtifactName || isArtifactSuffix || isStaleApp else { continue }
+                if dryRun {
+                    line("   would remove: \(item.path)")
+                    removed += 1
+                } else {
+                    do { try fm.removeItem(at: item); line("   removed: \(name)"); removed += 1 }
+                    catch { line("   ⚠️ couldn't remove \(name): \(error.localizedDescription)") }
+                }
+            }
+        }
+        let verb = dryRun ? "Would remove" : "Removed"
+        line("✓ \(verb) \(removed) lingering item(s).")
+        toast("\(verb) \(removed) build file\(removed == 1 ? "" : "s")", removed > 0 ? .success : .info)
+        return removed
+    }
+
+    // ── Clean the Downloads folder ───────────────────────────────────────────────
+    // Erase delivery zips and their extracted folders that pile up in ~/Downloads. By default it
+    // targets .zip files and any folder named "BuildBuddy" (the extract layout), plus common junk.
+    // Everything routes through the guarded cleaner; the UI asks for confirmation first.
+    @discardableResult
+    func cleanDownloads(zipsOnly: Bool, dryRun: Bool) async -> Int {
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: downloads, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            line("Couldn't read \(downloads.path)."); toast("Can't read Downloads", .error); return 0
+        }
+        line("🧹 Scanning Downloads for delivery leftovers…")
+        var removed = 0
+        for item in items {
+            let name = item.lastPathComponent
+            if name.hasPrefix(".") && name != ".DS_Store" { continue }   // leave dotfiles (except junk)
+            let isZip = name.lowercased().hasSuffix(".zip")
+            let isExtractFolder = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                && (name == "BuildBuddy" || name.hasSuffix(" folder") || name.hasPrefix("untitled"))
+            let isJunk = name == ".DS_Store"
+            let target = zipsOnly ? (isZip || isJunk) : (isZip || isExtractFolder || isJunk)
+            guard target else { continue }
+            if dryRun { line("   would remove: \(name)"); removed += 1 }
+            else {
+                do { try fm.removeItem(at: item); line("   removed: \(name)"); removed += 1 }
+                catch { line("   ⚠️ couldn't remove \(name): \(error.localizedDescription)") }
+            }
+        }
+        // Forget cleared zips so the Downloads auto-detect will notice a future same-named zip.
+        if !dryRun { seenDownloadZips.removeAll() }
+        let verb = dryRun ? "Would remove" : "Cleaned"
+        line("✓ \(verb) \(removed) item(s) from Downloads.")
+        toast("\(verb) \(removed) item\(removed == 1 ? "" : "s")", removed > 0 ? .success : .info)
+        return removed
+    }
+
+    // ── Stale-file / integrity scan ──────────────────────────────────────────────
+    // Surfaces problems that a normal git status can miss:
+    //   • STALE BUILDS: compiled artifacts (.o, .build, DerivedData, *.app) older than the newest
+    //     source file — i.e. the build predates your latest edits.
+    //   • DUPLICATE NAMES: files with the same name in different folders whose contents differ
+    //     (a classic "which one is real?" trap).
+    //   • UNTRACKED / MISSED: files git isn't tracking that aren't covered by .gitignore, which are
+    //     easy to forget to commit.
+    struct StaleReport {
+        var staleBuilds: [String] = []
+        var duplicateNames: [String] = []
+        var missedFiles: [String] = []
+        var newestSource: String = ""
+        var isEmpty: Bool { staleBuilds.isEmpty && duplicateNames.isEmpty && missedFiles.isEmpty }
+    }
+
+    func scanStaleFiles(for p: Project) async -> StaleReport {
+        var report = StaleReport()
+
+        // 1) Newest source mtime vs build-artifact mtimes.
+        let newestSrc = (await runQuiet("find . -type f \\( -name '*.swift' -o -name '*.h' -o -name '*.m' -o -name '*.c' -o -name '*.cpp' \\) -not -path '*/.build/*' -not -path '*/build/*' -not -path '*/DerivedData/*' -not -path '*/.git/*' -newer /dev/null -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1", cwd: p.url)).trimmingCharacters(in: .whitespacesAndNewlines)
+        var newestSrcEpoch: Double = 0
+        if let first = newestSrc.split(separator: " ").first, let e = Double(first) {
+            newestSrcEpoch = e
+            report.newestSource = newestSrc.split(separator: " ", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+        }
+        if newestSrcEpoch > 0 {
+            // Build artifacts newer-check: list artifacts OLDER than newest source.
+            let arts = (await runQuiet("find . \\( -name '*.o' -o -name '*.app' -o -path '*/.build/*' -o -path '*/DerivedData/*' -o -path '*/build/*' \\) -prune -printf '%T@ %p\\n' 2>/dev/null | sort -n | head -40", cwd: p.url))
+            for row in arts.split(separator: "\n") {
+                let parts = row.split(separator: " ", maxSplits: 1)
+                guard parts.count == 2, let e = Double(parts[0]) else { continue }
+                if e < newestSrcEpoch {
+                    report.staleBuilds.append(String(parts[1]))
+                }
+            }
+        }
+
+        // 2) Duplicate file names whose contents differ (compare md5 per basename).
+        let dupScan = (await runQuiet("find . -type f -not -path '*/.git/*' -not -path '*/.build/*' -not -path '*/build/*' -not -path '*/DerivedData/*' -exec basename {} \\; 2>/dev/null | sort | uniq -d | head -30", cwd: p.url))
+        for base in dupScan.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) where !base.isEmpty {
+            // For each repeated basename, hash each occurrence; flag if hashes differ.
+            let hashes = (await runQuiet("find . -type f -name \(Sh.q(base)) -not -path '*/.git/*' -not -path '*/.build/*' 2>/dev/null | while read f; do md5 -q \"$f\" 2>/dev/null || md5sum \"$f\" 2>/dev/null | cut -d' ' -f1; done | sort -u", cwd: p.url))
+            let uniqueHashes = hashes.split(separator: "\n").filter { !$0.isEmpty }
+            if uniqueHashes.count > 1 {
+                report.duplicateNames.append("\(base) — \(uniqueHashes.count) differing copies")
+            }
+        }
+
+        // 3) Untracked files not ignored (git's own view of "missed").
+        let untracked = (await runQuiet("git ls-files --others --exclude-standard 2>/dev/null | head -40", cwd: p.url))
+        for f in untracked.split(separator: "\n").map({ String($0) }) where !f.isEmpty {
+            report.missedFiles.append(f)
+        }
+
+        return report
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // v1.10 — Multi-zip queue (apply several deliveries in sequence)
+    // v1.12 — Clean folder: wipe a folder, or delete only files matching patterns
     // ════════════════════════════════════════════════════════════════════════════
 
-    func enqueueZips(_ urls: [URL]) {
-        let zips = urls.filter { $0.pathExtension.lowercased() == "zip" }
-        guard !zips.isEmpty else { return }
-        zipQueue.append(contentsOf: zips)
-        line("➕ Queued \(zips.count) delivery zip(s). Total in queue: \(zipQueue.count).")
-        toast("Queued \(zips.count) delivery\(zips.count == 1 ? "" : "s")", .info)
-    }
-
-    // Process the queue one at a time, applying each through the normal apply flow.
-    func processZipQueue() async {
-        guard !processingQueue else { return }
-        guard selected != nil else { line("Select a project first, then process the queue."); toast("Select a project first", .error); return }
-        processingQueue = true
-        defer { processingQueue = false }
-        var applied = 0
-        while !zipQueue.isEmpty {
-            let zip = zipQueue.removeFirst()
-            line("\n— Queue: applying \(zip.lastPathComponent) (\(zipQueue.count) remaining) —")
-            if let preview = await previewDelivery(zip: zip) {
-                await commitDelivery(from: preview)
-                applied += 1
+    // List what a clean WOULD remove, without deleting. `patterns` is a comma/space/newline list
+    // of glob-ish suffixes or names (e.g. "*.log, .DS_Store, build"). Empty patterns = everything
+    // in the folder (a full wipe). Returns the matching item URLs.
+    func cleanCandidates(folder: URL, patterns: String) -> [URL] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
+        let pats = patterns.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if pats.isEmpty { return items }   // full wipe
+        return items.filter { url in
+            let name = url.lastPathComponent
+            return pats.contains { pat in
+                if pat.hasPrefix("*") { return name.hasSuffix(String(pat.dropFirst())) }
+                return name == pat
             }
         }
-        line("✓ Queue finished — processed \(applied) delivery/deliveries.")
-        toast("Queue done: \(applied) applied", .success)
     }
 
-    func clearQueue() { zipQueue.removeAll(); toast("Queue cleared", .info) }
+    // Perform the clean. Guarded: refuses obviously dangerous roots, and the UI requires a typed
+    // confirmation. Deletes the matched items (or everything if patterns is empty).
+    @discardableResult
+    func cleanFolder(_ folder: URL, patterns: String, dryRun: Bool) async -> Int {
+        // Safety: never allow cleaning the home dir, a volume root, or a git working tree's root.
+        let path = folder.standardizedFileURL.path
+        let home = NSHomeDirectory()
+        let blocked = [home, "/", "/Users", "/System", "/Library", "/Applications"]
+        if blocked.contains(path) {
+            line("⛔️ Refusing to clean a protected location: \(path)")
+            toast("Protected location — not cleaned", .error)
+            return 0
+        }
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent(".git").path) && patterns.isEmpty {
+            line("⛔️ \(path) looks like a git repository root and patterns are empty (full wipe). Refusing — set patterns, or clean a subfolder.")
+            toast("Won't wipe a repo root", .error)
+            return 0
+        }
+        let targets = cleanCandidates(folder: folder, patterns: patterns)
+        if targets.isEmpty { line("Nothing to clean in \(path)."); toast("Nothing to clean", .info); return 0 }
+        let fm = FileManager.default
+        var removed = 0
+        line("🧹 \(dryRun ? "Would clean" : "Cleaning") \(targets.count) item(s) in \(path)…")
+        for t in targets {
+            if dryRun { line("   would remove: \(t.lastPathComponent)"); removed += 1; continue }
+            do { try fm.removeItem(at: t); removed += 1 }
+            catch { line("   ⚠️ couldn't remove \(t.lastPathComponent): \(error.localizedDescription)") }
+        }
+        let verb = dryRun ? "Would remove" : "Removed"
+        line("✓ \(verb) \(removed) item(s).")
+        toast("\(verb) \(removed) item\(removed == 1 ? "" : "s")", removed > 0 ? .success : .info)
+        return removed
+    }
 
     // Improvement #3 — guard the commit message before running it. Returns false if blocked.
     @discardableResult
+    // Build a default commit message from the working tree, so you don't have to type one.
+    // Summarizes how many files changed and lists a few names, e.g.
+    //   "Update 3 files: ContentView.swift, Models.swift, README.md"
+    func autoCommitMessage() async -> String {
+        guard let p = selected else { return "Update" }
+        let out = await runQuiet("git status --porcelain 2>/dev/null", cwd: p.url)
+        let lines = out.split(separator: "\n").map { String($0) }
+        guard !lines.isEmpty else { return "Update" }
+        // Parse "XY path" porcelain rows into (status, name).
+        var names: [String] = []
+        var added = 0, modified = 0, deleted = 0
+        for row in lines {
+            guard row.count > 3 else { continue }
+            let code = row.prefix(2).trimmingCharacters(in: .whitespaces)
+            let path = String(row.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            let name = (path as NSString).lastPathComponent
+            names.append(name)
+            if code.contains("A") || code.contains("?") { added += 1 }
+            else if code.contains("D") { deleted += 1 }
+            else { modified += 1 }
+        }
+        let total = names.count
+        // Verb based on the dominant change type.
+        let verb: String
+        if added > modified && added >= deleted { verb = "Add" }
+        else if deleted > modified && deleted >= added { verb = "Remove" }
+        else { verb = "Update" }
+        let shown = names.prefix(3).joined(separator: ", ")
+        let suffix = total > 3 ? " and \(total - 3) more" : ""
+        let fileWord = total == 1 ? "file" : "files"
+        return "\(verb) \(total) \(fileWord): \(shown)\(suffix)"
+    }
+
+    // Commit only (stage + commit), no push. Returns true if it ran without a blocking error.
+    @discardableResult
+    func commitOnly(message: String) async -> Bool {
+        await doCommit(message: message, push: false)
+    }
+
+    // Push only — push local commits to origin (with the same non-ff recovery as commitPush).
+    func pushOnly() async {
+        guard let p = selected else { return }
+        let branchOK = !branch.isEmpty && !branch.hasPrefix("(") && !branch.contains(" ")
+        guard branchOK else { line("❌ Can't push — no valid branch (\(branch)). Click Refresh."); return }
+        await pushWithRecovery(branch: branch, cwd: p.url)
+        await refresh()
+    }
+
+    // ── Offline / local repo support + GitHub connect helper ─────────────────────
+    // Local git (init, commit, branch, history, diff) always works with no remote. When a repo has
+    // no 'origin', the UI offers this helper to connect it to GitHub — via the gh CLI if installed,
+    // or with copy-paste commands + browser steps otherwise.
+
+    // Is the GitHub CLI available?
+    func hasGHCLI() async -> Bool {
+        let out = (await runQuiet("command -v gh 2>/dev/null", cwd: nil)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return !out.isEmpty
+    }
+
+    // Is gh authenticated?
+    func ghAuthenticated() async -> Bool {
+        guard let p = selected else { return false }
+        let r = await runQuiet("gh auth status 2>&1", cwd: p.url)
+        return r.lowercased().contains("logged in")
+    }
+
+    // Initialize a git repo in the selected folder (for non-repos).
+    func gitInit() async {
+        guard let p = selected else { return }
+        _ = await run("git init && git add -A && git commit -m \"Initial commit\" 2>&1 | tail -3", cwd: p.url, label: "git init")
+        await refresh()
+    }
+
+    // Create the GitHub repo with gh and wire up origin, then push. visibility is private or public.
+    func createGitHubRepoWithGH(name: String, visibility: String) async {
+        guard let p = selected else { return }
+        if !isGitRepo { await gitInit() }
+        let vis = visibility == "public" ? "--public" : "--private"
+        _ = await run("gh repo create \(Sh.q(name)) \(vis) --source=. --remote=origin --push 2>&1", cwd: p.url, label: "Create GitHub repo")
+        await refresh()
+        if hasRemote { line("✅ Connected to GitHub and pushed. Remote: \(remoteURL)"); toast("Connected to GitHub", .success) }
+    }
+
+    // Manual path: add a remote the user created in the browser, set upstream, push.
+    func connectExistingRemote(url: String) async {
+        guard let p = selected else { return }
+        if !isGitRepo { await gitInit() }
+        let br = branch.isEmpty || branch.hasPrefix("(") ? "main" : branch
+        _ = await run("git remote add origin \(Sh.q(url)) 2>&1 || git remote set-url origin \(Sh.q(url)); git branch -M \(Sh.q(br)); git push -u origin \(Sh.q(br)) 2>&1", cwd: p.url, label: "Connect remote")
+        await refresh()
+        if hasRemote { line("✅ Remote connected and pushed."); toast("Remote connected", .success) }
+    }
+
+    // ── Version / build numbering ────────────────────────────────────────────────
+    // Standard (shared by all apps): VERSION = small changes/fixes (dotted, e.g. 1.0 → 1.1),
+    // BUILD = big features/changes (integer, +1). Numbers can live in two places depending on how
+    // the app's Xcode project is set up:
+    //   • Xcode project (pbxproj): MARKETING_VERSION (version) + CURRENT_PROJECT_VERSION (build)
+    //   • Info.plist:              CFBundleShortVersionString (version) + CFBundleVersion (build)
+    // BuildBuddy detects which exist and updates BOTH when both are present and don't conflict,
+    // so the app, all targets, and the What's New screen stay in lockstep. If they conflict, the
+    // pbxproj wins for Xcode apps (it's the build-settings source of truth) and is mirrored to the
+    // plist. This reconciles the differing approaches across the Stocked / FrameTV scripts.
+
+    struct VersionInfo {
+        var plistPath: String?       // Info.plist with CFBundle* keys, if any
+        var pbxPath: String?         // project.pbxproj with *_VERSION settings, if any
+        var version: String          // resolved current VERSION (marketing / short)
+        var build: String            // resolved current BUILD
+        var hasPlistKeys: Bool       // plist actually has the CFBundle* keys
+        var hasPbxKeys: Bool         // pbxproj actually has the *_VERSION keys
+    }
+
+    // Locate Info.plist (with CFBundle keys) and/or the pbxproj (with version settings).
+    func locateVersionFiles(for p: Project) async -> VersionInfo {
+        var info = VersionInfo(plistPath: nil, pbxPath: nil, version: "", build: "",
+                               hasPlistKeys: false, hasPbxKeys: false)
+
+        // --- Info.plist ---
+        let plistCandidates = ["Info.plist", "\(p.name)/Info.plist", "Sources/Info.plist"]
+        var plist: String?
+        for rel in plistCandidates {
+            let full = p.url.appendingPathComponent(rel).path
+            if FileManager.default.fileExists(atPath: full) { plist = full; break }
+        }
+        if plist == nil {
+            let found = await runQuiet("find . -name Info.plist -not -path '*/.build/*' -not -path '*/build/*' -not -path '*/DerivedData/*' 2>/dev/null | head -1", cwd: p.url).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !found.isEmpty { plist = p.url.appendingPathComponent(found.replacingOccurrences(of: "./", with: "")).path }
+        }
+        if let plist {
+            let q = Sh.q(plist)
+            let v = (await runQuiet("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \(q) 2>/dev/null", cwd: nil)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let b = (await runQuiet("/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \(q) 2>/dev/null", cwd: nil)).trimmingCharacters(in: .whitespacesAndNewlines)
+            // Only count as "has keys" if they're real literals (not $(VAR) build-setting refs).
+            let vReal = !v.isEmpty && !v.contains("$(")
+            let bReal = !b.isEmpty && !b.contains("$(")
+            info.plistPath = plist
+            info.hasPlistKeys = vReal || bReal
+            if vReal && info.version.isEmpty { info.version = v }
+            if bReal && info.build.isEmpty { info.build = b }
+        }
+
+        // --- pbxproj ---
+        let pbx = (await runQuiet("find . -name project.pbxproj -not -path '*/.build/*' 2>/dev/null | head -1", cwd: p.url)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pbx.isEmpty {
+            let pbxFull = p.url.appendingPathComponent(pbx.replacingOccurrences(of: "./", with: "")).path
+            let q = Sh.q(pbxFull)
+            let mv = (await runQuiet("grep -Eo 'MARKETING_VERSION = [^;]+;' \(q) 2>/dev/null | head -1 | sed -E 's/MARKETING_VERSION = //; s/;//' | tr -d ' '", cwd: nil)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let cpv = (await runQuiet("grep -Eo 'CURRENT_PROJECT_VERSION = [0-9]+;' \(q) 2>/dev/null | grep -Eo '[0-9]+' | sort -n | tail -1", cwd: nil)).trimmingCharacters(in: .whitespacesAndNewlines)
+            info.pbxPath = pbxFull
+            info.hasPbxKeys = !mv.isEmpty || !cpv.isEmpty
+            // pbxproj wins for the resolved values when present (build-settings source of truth).
+            if !mv.isEmpty { info.version = mv }
+            if !cpv.isEmpty { info.build = cpv }
+        }
+
+        if info.version.isEmpty { info.version = "1.0" }
+        if info.build.isEmpty { info.build = "1" }
+        return info
+    }
+
+    // Write a VERSION value to every place that exists (plist + pbxproj).
+    private func writeVersion(_ v: String, _ info: VersionInfo) async {
+        if let plist = info.plistPath {
+            let q = Sh.q(plist)
+            _ = await run("/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString \(v)' \(q) 2>/dev/null || /usr/libexec/PlistBuddy -c 'Add :CFBundleShortVersionString string \(v)' \(q)", cwd: nil, label: "Set version (plist)")
+        }
+        if let pbx = info.pbxPath, info.hasPbxKeys {
+            let q = Sh.q(pbx)
+            _ = await run("/usr/bin/sed -i '' -E 's/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = \(v);/g' \(q)", cwd: nil, label: "Set version (pbxproj)")
+        }
+    }
+
+    // Write a BUILD value to every place that exists (plist + pbxproj).
+    private func writeBuild(_ b: String, _ info: VersionInfo) async {
+        if let plist = info.plistPath {
+            let q = Sh.q(plist)
+            _ = await run("/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion \(b)' \(q) 2>/dev/null || /usr/libexec/PlistBuddy -c 'Add :CFBundleVersion string \(b)' \(q)", cwd: nil, label: "Set build (plist)")
+        }
+        if let pbx = info.pbxPath, info.hasPbxKeys {
+            let q = Sh.q(pbx)
+            _ = await run("/usr/bin/sed -i '' -E 's/CURRENT_PROJECT_VERSION = [0-9]+;/CURRENT_PROJECT_VERSION = \(b);/g' \(q)", cwd: nil, label: "Set build (pbxproj)")
+        }
+    }
+
+    func readVersionBuild(for p: Project) async -> (version: String, build: String)? {
+        let info = await locateVersionFiles(for: p)
+        guard info.hasPlistKeys || info.hasPbxKeys else { return nil }
+        return (info.version, info.build)
+    }
+
+    // Is the app already on the standard? (version is "1.x" form AND a numeric build exists.)
+    func isStandardized(_ info: VersionInfo) -> Bool {
+        let vOK = info.version.split(separator: ".").first.map { $0 == "1" } ?? false
+        let bOK = Int(info.build) != nil
+        return (info.hasPlistKeys || info.hasPbxKeys) && vOK && bOK
+    }
+
+    // Bump the BUILD number (big change): integer + 1, written everywhere it lives.
+    func bumpBuild() async {
+        guard let p = selected else { return }
+        let info = await locateVersionFiles(for: p)
+        guard info.hasPlistKeys || info.hasPbxKeys else { line("No version info found (no Info.plist keys or pbxproj settings) in \(p.name)."); toast("No version info", .error); return }
+        let next = (Int(info.build) ?? 1) + 1
+        await writeBuild("\(next)", info)
+        await appendWhatsNew(for: p, version: info.version, build: "\(next)", kind: "Build", note: "Big change")
+        line("⬆️ Build: \(info.build) → \(next) (big change), written to \(targetsDescription(info)).")
+        toast("Build → \(next)", .success)
+    }
+
+    // Bump the VERSION (small change/fix): increment the last dotted component, written everywhere.
+    func bumpVersion() async {
+        guard let p = selected else { return }
+        let info = await locateVersionFiles(for: p)
+        guard info.hasPlistKeys || info.hasPbxKeys else { line("No version info found in \(p.name)."); toast("No version info", .error); return }
+        var parts = info.version.split(separator: ".").map { Int($0) ?? 0 }
+        if parts.isEmpty { parts = [1, 0] }
+        parts[parts.count - 1] += 1
+        let next = parts.map(String.init).joined(separator: ".")
+        await writeVersion(next, info)
+        await appendWhatsNew(for: p, version: next, build: info.build, kind: "Version", note: "Small change or fix")
+        line("⬆️ Version: \(info.version) → \(next) (small change), written to \(targetsDescription(info)).")
+        toast("Version → \(next)", .success)
+    }
+
+    private func targetsDescription(_ info: VersionInfo) -> String {
+        var places: [String] = []
+        if info.hasPbxKeys { places.append("Xcode project") }
+        if info.plistPath != nil { places.append("Info.plist") }
+        return places.isEmpty ? "nowhere" : places.joined(separator: " + ")
+    }
+
+    // ── Standardize this app (one click, idempotent) ─────────────────────────────
+    // Detects the app's setup and brings it onto the shared standard:
+    //   • If NOT standardized: reset to VERSION 1.0 / BUILD 1 everywhere the numbers live.
+    //   • If ALREADY standardized: leaves the numbers alone (won't reset your progress).
+    //   • Either way: ensures a timestamped What's New entry exists/updates.
+    func standardizeApp() async {
+        guard let p = selected else { return }
+        let info = await locateVersionFiles(for: p)
+        line("🔎 Standardizing \(p.name) — found: \(info.hasPbxKeys ? "Xcode project version settings" : "no pbxproj settings"), \(info.plistPath != nil ? "Info.plist" : "no Info.plist").")
+
+        if info.hasPlistKeys || info.hasPbxKeys {
+            if isStandardized(info) {
+                line("✓ \(p.name) is already standardized (version \(info.version), build \(info.build)). Leaving numbers as-is.")
+                toast("Already standardized", .info)
+            } else {
+                await writeVersion("1.0", info)
+                await writeBuild("1", info)
+                line("↺ Reset \(p.name) to the baseline: version 1.0, build 1 (written to \(targetsDescription(info))).")
+                toast("Reset to 1.0 / build 1", .success)
+            }
+        } else {
+            // No version info anywhere — create CFBundle keys in the Info.plist if we have one.
+            if info.plistPath != nil {
+                var withKeys = info
+                withKeys.hasPlistKeys = true
+                await writeVersion("1.0", withKeys)
+                await writeBuild("1", withKeys)
+                line("➕ \(p.name) had no version info — set version 1.0 / build 1 in Info.plist.")
+                toast("Initialized 1.0 / build 1", .success)
+            } else {
+                line("⚠️ \(p.name) has no Info.plist or Xcode project to write version info into. Skipped numbering.")
+                toast("No place to write version", .error)
+            }
+        }
+
+        // Ensure a timestamped What's New entry.
+        let final = await locateVersionFiles(for: p)
+        await appendWhatsNew(for: p, version: final.version, build: final.build, kind: "Standardize",
+                             note: "Standardized to the shared version and build scheme")
+    }
+
+    // Reset to the standard baseline: version 1.0, build 1 (used when migrating an app).
+    func resetVersionBuild() async {
+        guard let p = selected else { return }
+        let info = await locateVersionFiles(for: p)
+        var i = info
+        if i.plistPath != nil { i.hasPlistKeys = true }   // force-create keys on explicit reset
+        await writeVersion("1.0", i)
+        await writeBuild("1", i)
+        await appendWhatsNew(for: p, version: "1.0", build: "1", kind: "Reset", note: "Reset to baseline 1.0 / build 1")
+        line("↺ Reset \(p.name) to the standard baseline: version 1.0, build 1.")
+        toast("Reset to 1.0 / build 1", .success)
+    }
+
+    // ── Timestamped What's New / changelog ───────────────────────────────────────
+    // Detects the app's existing changelog and prepends a timestamped entry, format MM:DD:YY HH:MM.
+    // Looks for (in order): CHANGELOG.md, WHATS_NEW.md, WHATSNEW.md, CHANGES.md at the repo root,
+    // then any Swift file containing a "What's New" / "What's Changed" marker. If none exists,
+    // creates CHANGELOG.md.
+    func appendWhatsNew(for p: Project, version: String, build: String, kind: String, note: String) async {
+        let stamp = Self.timestamp()                       // MM:DD:YY HH:MM
+        let header = "\(stamp) — v\(version) (build \(build)) — \(kind)"
+        let entry = "\(header)\n\(note)\n"
+
+        // 1) A markdown changelog at the repo root?
+        let mdCandidates = ["CHANGELOG.md", "WHATS_NEW.md", "WHATSNEW.md", "CHANGES.md"]
+        for name in mdCandidates {
+            let path = p.url.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: path.path) {
+                await prependToFile(path, entry: entry + "\n")
+                line("📝 Updated \(name) with: \(header)")
+                return
+            }
+        }
+
+        // 2) A Swift file with a What's New / What's Changed marker?
+        let swiftHit = (await runQuiet("grep -rilE \"what'?s (new|changed)\" --include='*.swift' . 2>/dev/null | head -1", cwd: p.url)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !swiftHit.isEmpty {
+            // Don't rewrite arbitrary Swift structure; instead drop a companion CHANGELOG.md AND
+            // leave a note. Editing source changelogs varies too much per app to do safely blind.
+            let path = p.url.appendingPathComponent("CHANGELOG.md")
+            await prependToFile(path, entry: entry + "\n")
+            line("📝 \(p.name) keeps its What's New in source (\(swiftHit)). Recorded the timestamped entry in CHANGELOG.md to keep history; copy it into the in-app list if desired.")
+            return
+        }
+
+        // 3) Nothing exists — create CHANGELOG.md.
+        let path = p.url.appendingPathComponent("CHANGELOG.md")
+        let head = "# Changelog\n\nTimestamps are MM:DD:YY HH:MM (local time).\n\n"
+        if !FileManager.default.fileExists(atPath: path.path) {
+            try? head.write(to: path, atomically: true, encoding: .utf8)
+        }
+        await prependToFile(path, entry: entry + "\n", afterHeaderLines: 4)
+        line("📝 Created CHANGELOG.md and added: \(header)")
+    }
+
+    // Prepend an entry to a text file (optionally after a fixed number of header lines).
+    private func prependToFile(_ url: URL, entry: String, afterHeaderLines: Int = 0) async {
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if afterHeaderLines > 0 {
+            let lines = existing.components(separatedBy: "\n")
+            let head = lines.prefix(afterHeaderLines).joined(separator: "\n")
+            let rest = lines.dropFirst(afterHeaderLines).joined(separator: "\n")
+            let combined = head + "\n" + entry + rest
+            try? combined.write(to: url, atomically: true, encoding: .utf8)
+        } else {
+            try? (entry + existing).write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // Timestamp in the required MM:DD:YY HH:MM format (local time).
+    static func timestamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MM:dd:yy HH:mm"
+        return f.string(from: Date())
+    }
+
+    // ── Exporting the instructions ───────────────────────────────────────────────
+    // The combined playbook (delivery format + build/version standard), as one document.
+    static var fullInstructions: String {
+        DeliveryInstructions.text + "\n\n\n" + BuildStandard.text + "\n\n\n" + DeployInstructions.text
+    }
+
+    // Copy the instructions to the clipboard.
+    func copyInstructions() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Self.fullInstructions, forType: .string)
+        toast("Instructions copied", .success)
+    }
+
+    // Save the instructions as a .md or .txt file via a save panel.
+    func exportInstructions(markdown: Bool) {
+        let panel = NSSavePanel()
+        panel.title = "Export BuildBuddy instructions"
+        panel.nameFieldStringValue = markdown ? "BuildBuddy-Instructions.md" : "BuildBuddy-Instructions.txt"
+        panel.allowedContentTypes = markdown ? [.init(filenameExtension: "md") ?? .plainText] : [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let body = markdown ? Self.instructionsMarkdown : Self.fullInstructions
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            line("✓ Exported instructions to \(url.path)")
+            toast("Exported \(url.lastPathComponent)", .success)
+        } catch {
+            line("❌ Couldn't export: \(error.localizedDescription)")
+            toast("Export failed", .error)
+        }
+    }
+
+    // A lightly Markdown-formatted version (headings become #/##; the plain text is already close).
+    static var instructionsMarkdown: String {
+        var out = "# BuildBuddy Instructions\n\n"
+        out += "_Delivery format, the shared Build & Version standard, and the website deploy guide._\n\n"
+        for block in [DeliveryInstructions.text, BuildStandard.text, DeployInstructions.text] {
+            for raw in block.split(separator: "\n", omittingEmptySubsequences: false) {
+                let lineStr = String(raw)
+                // ALL-CAPS lines (titles) → headings.
+                let trimmed = lineStr.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty,
+                   trimmed == trimmed.uppercased(),
+                   trimmed.rangeOfCharacter(from: CharacterSet.letters) != nil,
+                   trimmed.count < 70 {
+                    out += "\n## \(trimmed)\n"
+                } else {
+                    out += lineStr + "\n"
+                }
+            }
+            out += "\n"
+        }
+        return out
+    }
+
+    // What the Next button should do right now.
+    var nextStep: NextStep {
+        if let zip = pendingDeliveryZip { return .applyDelivery(zip.lastPathComponent) }
+        if statusLine != "clean" && statusLine != "" { return .commit }
+        return .finished
+    }
+
+    // Run whatever Next resolves to. `applyHandler` is provided by the view so applying a delivery
+    // reuses the existing preview/commit flow. `commitMessage` is the (possibly edited) inline text.
+    func runNextStep(commitMessage: String, applyHandler: (URL) -> Void) async {
+        switch nextStep {
+        case .applyDelivery(let name):
+            if let zip = pendingDeliveryZip {
+                line("▶️ Next: applying delivery \(name)…")
+                applyHandler(zip)
+            }
+        case .commit:
+            line("▶️ Next: committing changes…")
+            let trimmed = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            let msg = trimmed.isEmpty ? await autoCommitMessage() : trimmed
+            if hasRemote { _ = await commitPush(message: msg) }
+            else { _ = await commitOnly(message: msg) }
+        case .finished:
+            toast("Nothing to do — you're all caught up", .info)
+        }
+    }
+
     func commitPush(message: String) async -> Bool {
+        await doCommit(message: message, push: settings.pushAfterCommit && !askedAndDeclinedPush())
+    }
+
+    // Shared commit core used by commitOnly / commitPush.
+    @discardableResult
+    private func doCommit(message: String, push: Bool) async -> Bool {
         guard let p = selected, !message.isEmpty else { return false }
         let problems = CommitSafety.problems(in: message)
         if settings.blockUnsafeCommitMessages, !problems.isEmpty {
@@ -1091,24 +1708,135 @@ final class Store: ObservableObject {
             lastResult = "❌ No valid branch"
             return false
         }
-        let safe = message.replacingOccurrences(of: "\"", with: "\\\"")
-        let doPush = settings.pushAfterCommit && !askedAndDeclinedPush()
+        // ── v2.0 REGRESSION GUARD ────────────────────────────────────────────────
+        // Compare the working tree against the last-known-good baseline the Learn
+        // engine recorded. If files that existed in every good build are now gone,
+        // or a source file collapsed in size, warn BEFORE the commit seals it in.
+        if settings.regressionGuard {
+            let reg = regressionFindings(for: p)
+            if !reg.isEmpty {
+                line("⚠️ Possible regression before commit in \(p.name):")
+                for m in reg.missing.prefix(10) { line("   • previously present, now missing: \(m)") }
+                for s in reg.shrunk.prefix(10) { line("   • drastically smaller than the last good build: \(s)") }
+                let alert = NSAlert()
+                alert.messageText = "Possible regression detected"
+                alert.informativeText = "\(reg.missing.count) file(s) that existed in the last good build are missing, and \(reg.shrunk.count) source file(s) shrank by more than half. This can mean a delivery reverted work. Commit anyway?"
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Commit anyway")
+                alert.addButton(withTitle: "Cancel commit")
+                guard alert.runModal() == .alertFirstButtonReturn else {
+                    lastResult = "⚠️ Commit cancelled (regression guard)"
+                    toast("Commit cancelled — review the findings", .info)
+                    return false
+                }
+            }
+        }
 
-        // Stage, then commit only if there's something staged. This avoids the misleading
-        // "Commit & Push failed (exit 1)" when the tree is already clean. If clean and push
-        // is requested, still push any local commits that haven't reached origin.
-        let commitCmd = "git add -A; " +
-            "if git diff --cached --quiet; then echo 'BB_NOTHING_TO_COMMIT'; else git commit -m \"\(safe)\"; fi"
-        let r = await run(commitCmd, cwd: p.url, label: "Commit")
+        let safe = message.replacingOccurrences(of: "\"", with: "\\\"")
+
+        // ── v2.0 PROJECT-SCOPE GUARD ─────────────────────────────────────────────
+        // Commits are strictly project-specific. Two protections:
+        //   1. The repo toplevel must BE the project's own path. If the project folder is
+        //      nested inside some larger repo, a plain `git add -A` would stage files from
+        //      OTHER projects living in that outer repo — so we refuse and explain.
+        //   2. Any other registered project nested INSIDE this repo is excluded from
+        //      staging with a pathspec, so its files can never ride along.
+        let top = (await runQuiet("git rev-parse --show-toplevel 2>/dev/null", cwd: p.url))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !top.isEmpty, URL(fileURLWithPath: top).standardizedFileURL.path != p.url.standardizedFileURL.path {
+            line("⛔️ Commit blocked — \(p.name) sits inside a larger git repo (\(top)).")
+            line("   Committing from here would sweep in files that belong to other projects.")
+            line("   Add \(top) as its own project, or give \(p.name) its own repo (git init).")
+            lastResult = "⛔️ Commit blocked (repo scope)"
+            toast("Blocked: repo root belongs to another project", .error)
+            return false
+        }
+        let r = await run(scopedStageAndCommitCommand(for: p, safeMessage: safe), cwd: p.url, label: "Commit")
 
         let nothing = r.out.contains("BB_NOTHING_TO_COMMIT")
         if nothing { line("Nothing new to commit — working tree is clean.") }
 
-        if doPush {
-            _ = await run("git push origin \(Sh.q(branch))", cwd: p.url, label: "Push")
+        if push {
+            await pushWithRecovery(branch: branch, cwd: p.url)
         }
+        // ── v2.0 AUTO CACHE CLEAR + LEARN ────────────────────────────────────────
+        // Every commit clears this project's cached status (fresh read next paint),
+        // prunes stale delivery temp dirs and old apply backups, and — when learning
+        // is on — updates the project's baseline manifest so the Sync engine knows
+        // this tree as the newest good state.
+        await postCommitMaintenance(for: p, committed: !nothing)
         await refresh()
         return true
+    }
+
+    // Builds the stage+commit shell command scoped to THIS project only. Other registered
+    // projects nested under this repo root are excluded via git pathspecs.
+    func scopedStageAndCommitCommand(for p: Project, safeMessage: String) -> String {
+        let rootPath = p.url.standardizedFileURL.path
+        let nestedOthers = projects.filter {
+            $0.id != p.id && $0.url.standardizedFileURL.path.hasPrefix(rootPath + "/")
+        }
+        var stage = "git add -A -- ."
+        if !nestedOthers.isEmpty {
+            let excludes = nestedOthers.map { other -> String in
+                let rel = String(other.url.standardizedFileURL.path.dropFirst(rootPath.count + 1))
+                return Sh.q(":(exclude)\(rel)")
+            }
+            stage = "git add -A -- . " + excludes.joined(separator: " ")
+        }
+        return stage + "; if git diff --cached --quiet; then echo 'BB_NOTHING_TO_COMMIT'; else git commit -m \"\(safeMessage)\"; fi"
+    }
+
+    // Pushes, and if the push is rejected as non-fast-forward, automatically recovers using the
+    // sequence the user verified works: fetch, then push --force-with-lease; if that still reports
+    // "stale info", fall back to a plain --force. This is safe for a SOLE-CONTRIBUTOR, DISPOSABLE
+    // remote (local history is the source of truth). It is gated behind a setting so it can't
+    // surprise anyone who shares the repo. LOCAL COMMITS ARE NEVER TOUCHED — only the remote ref
+    // is overwritten to match local.
+    func pushWithRecovery(branch: String, cwd: URL) async {
+        // Master kill switch: when on, BuildBuddy never auto-pushes. Your local commits are made,
+        // but nothing touches the remote — so a concurrent pusher can't race you. Push manually.
+        if settings.pauseAllAutoPush {
+            line("⏸️ Auto-push is paused (Options → Pushing). Commit done locally; remote untouched.")
+            toast("Auto-push paused — pushed nothing", .info)
+            return
+        }
+        let b = Sh.q(branch)
+        let first = await run("git push origin \(b)", cwd: cwd, label: "Push")
+        let out = first.out.lowercased()
+        let rejected = first.code != 0 && (out.contains("non-fast-forward") || out.contains("fetch first")
+            || out.contains("rejected") || out.contains("tip of your current branch is behind"))
+        guard rejected else { return }
+
+        guard settings.forcePushOnReject else {
+            line("⚠️ Push was rejected (the remote has commits your local doesn't, or diverged).")
+            line("   Auto force-push recovery is OFF. Turn on 'Force-push over a diverged remote' in Options,")
+            line("   or resolve manually: git fetch origin, then git push --force-with-lease origin \(branch).")
+            toast("Push rejected — remote diverged", .error)
+            return
+        }
+
+        line("↩︎ Push rejected as non-fast-forward. Recovering: fetch, then force-with-lease…")
+        _ = await run("git fetch origin", cwd: cwd, label: "Fetch (recovery)")
+        let lease = await run("git push --force-with-lease origin \(b)", cwd: cwd, label: "Force-push (with lease)")
+        if lease.code == 0 {
+            line("✓ Recovered: remote overwritten to match local (force-with-lease).")
+            toast("Push recovered (force-with-lease)", .success)
+            return
+        }
+        // --force-with-lease can fail with "stale info" if the local remote-tracking ref is itself
+        // out of date. The user confirmed a plain --force is the reliable fallback here.
+        if lease.out.lowercased().contains("stale info") || lease.code != 0 {
+            line("⚠️ force-with-lease reported stale info — falling back to a plain force-push.")
+            let force = await run("git push --force origin \(b)", cwd: cwd, label: "Force-push")
+            if force.code == 0 {
+                line("✓ Recovered: remote overwritten to match local (force).")
+                toast("Push recovered (force)", .success)
+            } else {
+                line("❌ Even a force-push failed. Check your network and 'gh auth status'.")
+                toast("Push failed", .error)
+            }
+        }
     }
 
     // Respects "Ask before pushing": returns true if the user declined the push.
@@ -1138,8 +1866,8 @@ final class Store: ObservableObject {
 
     func merge(_ src: String) async {
         guard let p = selected else { return }
-        _ = await run("git merge --no-edit \(Sh.q(src)) && git push origin \(Sh.q(branch))",
-                      cwd: p.url, label: "Merge")
+        let r = await run("git merge --no-edit \(Sh.q(src))", cwd: p.url, label: "Merge")
+        if r.code == 0 { await pushWithRecovery(branch: branch, cwd: p.url) }
         await refresh()
     }
 
@@ -1165,19 +1893,20 @@ final class Store: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([p.url])
     }
 
-    // MARK: Self-update (so BuildBuddy can update itself instead of needing a drop)
+    // MARK: Self-update — pull the BuildBuddy repo and recompile via the launcher.
+    // BuildBuddy is a self-hosted single .swift file compiled by "Launch BuildBuddy.command".
+    // Updating means: pull the latest source, then relaunch through the launcher, which rebuilds
+    // because the source is now newer than the compiled binary.
 
     @Published var updateStatus: String = ""
     @Published var updateAvailable = false
 
-    // Find the folder that contains this app's own source. Prefers a project named
-    // "BuildBuddy"; otherwise asks the bundle where it lives and walks up to the repo root.
+    // Find the folder that contains this app's own source. Prefers a project named "BuildBuddy";
+    // otherwise asks the bundle where it lives and walks up to find the folder with BuildBuddy.swift.
     func locateSelfRepo() -> URL? {
         if let p = projects.first(where: { $0.name.caseInsensitiveCompare("BuildBuddy") == .orderedSame }) {
             return p.url
         }
-        // The compiled app lives at <repo>/.build/BuildBuddy.app/Contents/MacOS/BuildBuddy.
-        // Walk up from the executable to find a folder containing BuildBuddy.swift.
         var dir = URL(fileURLWithPath: Bundle.main.bundlePath)
         for _ in 0..<6 {
             dir.deleteLastPathComponent()
@@ -1192,7 +1921,7 @@ final class Store: ObservableObject {
     func checkForUpdates() async {
         guard let repo = locateSelfRepo() else {
             updateStatus = "Couldn't find the BuildBuddy repo. Add the BuildBuddy folder as a project, then try again."
-            line(updateStatus)
+            line(updateStatus); toast("BuildBuddy repo not found", .error)
             return
         }
         line("Checking for BuildBuddy updates in \(repo.path) …")
@@ -1208,10 +1937,11 @@ final class Store: ObservableObject {
             updateAvailable = true
             updateStatus = "Update downloaded. Click Update & Relaunch to rebuild."
             line("⬆️ A newer BuildBuddy.swift was pulled. " + updateStatus)
+            toast("Update available", .success)
         } else {
             updateAvailable = false
             updateStatus = "BuildBuddy is up to date (v\(BuildBuddyVersion))."
-            line("✅ " + updateStatus)
+            line("✅ " + updateStatus); toast("Up to date", .info)
         }
     }
 
@@ -1221,6 +1951,7 @@ final class Store: ObservableObject {
         let launcher = repo.appendingPathComponent("Launch BuildBuddy.command")
         guard FileManager.default.fileExists(atPath: launcher.path) else {
             line("Couldn't find 'Launch BuildBuddy.command' in \(repo.path).")
+            toast("Launcher not found", .error)
             return
         }
         line("Rebuilding and relaunching BuildBuddy …")
@@ -1374,6 +2105,8 @@ final class Store: ObservableObject {
             try? FileManager.default.removeItem(at: preview.tmpDir)
             return
         }
+        // Applying this delivery satisfies the pending "Next" step.
+        pendingDeliveryZip = nil
 
         if settings.clearConsoleOnAction { clearConsole() }
 
@@ -1501,22 +2234,23 @@ final class Store: ObservableObject {
     // Returns the first new match not already seen this session.
     func scanDownloadsForDelivery() async -> URL? {
         guard settings.watchDownloads, let p = selected else { return nil }
-        let dl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        guard let dl else { return nil }
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: dl, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return nil }
-        let zips = items.filter { $0.pathExtension.lowercased() == "zip" }
-            .sorted { (a, b) in
-                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                return da > db
-            }
         let repoName = p.name.lowercased()
+        // Gather candidate zips across Downloads + any extra watch folders, newest first.
+        var zips: [URL] = []
+        for folder in watchFolders {
+            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { continue }
+            zips.append(contentsOf: items.filter { $0.pathExtension.lowercased() == "zip" })
+        }
+        zips.sort { (a, b) in
+            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return da > db
+        }
         for zip in zips {
             if seenDownloadZips.contains(zip.path) { continue }
             let fileMatches = zip.lastPathComponent.lowercased().contains(repoName)
             var innerMatches = false
-            // Peek at the inner top folder name without extracting fully.
             let listing = syncShell("/usr/bin/unzip -Z1 \(Sh.q(zip.path)) | head -n1", cwd: nil, timeout: 10).out
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let topFolder = listing.split(separator: "/").first.map(String.init)?.lowercased() ?? ""
@@ -1540,7 +2274,567 @@ extension DateFormatter {
     }()
 }
 
-// MARK: - App
+
+// ════════════════════════════════════════════════════════════════════════════
+// v2.0 — SYNC & LEARN ENGINE
+// ════════════════════════════════════════════════════════════════════════════
+// BuildBuddy keeps a lightweight per-project manifest: every file's relative
+// path, size and modification time, captured at each known-good moment (a
+// successful commit, or an explicit "Learn this build"). The engine powers:
+//   • Sync scan   — what's NEW since the last good build (files & folders you
+//                   may have forgotten to commit), plus git's untracked view.
+//   • Regression  — what VANISHED or collapsed in size versus the last good
+//     guard         build, caught BEFORE a commit seals it in.
+//   • Learning    — every successful commit re-teaches the baseline, so the
+//                   app continuously learns from new builds and changes.
+
+struct FileSnapshot: Codable, Equatable {
+    var size: Int
+    var mtime: Double
+}
+
+struct ProjectManifest: Codable {
+    var projectPath: String
+    var updated: Date
+    var goodBuilds: Int          // how many good builds/commits have taught this baseline
+    var files: [String: FileSnapshot]
+}
+
+enum ManifestStore {
+    static func file(for id: Project.ID) -> URL {
+        Persist.dir.appendingPathComponent("manifest_\(id.uuidString).json")
+    }
+    static func load(for id: Project.ID) -> ProjectManifest? {
+        guard let data = try? Data(contentsOf: file(for: id)),
+              let m = try? JSONDecoder().decode(ProjectManifest.self, from: data) else { return nil }
+        return m
+    }
+    static func save(_ m: ProjectManifest, for id: Project.ID) {
+        if let data = try? JSONEncoder().encode(m) { try? data.write(to: file(for: id)) }
+    }
+    static func delete(for id: Project.ID) {
+        try? FileManager.default.removeItem(at: file(for: id))
+    }
+}
+
+extension Store {
+
+    // Folders that never belong in a manifest (build output, deps, VCS, backups).
+    static let manifestSkipDirs: Set<String> = [
+        ".git", ".build", "build", "DerivedData", "node_modules",
+        ".buildbuddy-backups", "dist", ".swiftpm", "__pycache__", ".venv",
+    ]
+    static let sourceExtensions: Set<String> = [
+        "swift", "h", "m", "c", "cpp", "js", "ts", "tsx", "jsx", "css",
+        "html", "py", "rb", "go", "rs", "json", "md", "sh", "toml", "yml", "yaml",
+    ]
+
+    // Walk the project and snapshot every file (bounded; skips build/dep folders).
+    nonisolated func snapshotTree(at root: URL) -> [String: FileSnapshot] {
+        var out: [String: FileSnapshot] = [:]
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: keys,
+                                     options: [.skipsPackageDescendants]) else { return out }
+        let rootPath = root.standardizedFileURL.path
+        for case let u as URL in en {
+            guard out.count < 25_000 else { break }   // sanity bound for huge trees
+            let name = u.lastPathComponent
+            let vals = try? u.resourceValues(forKeys: Set(keys))
+            if vals?.isDirectory == true {
+                if Self.manifestSkipDirs.contains(name) || name.hasSuffix(".app") {
+                    en.skipDescendants()
+                }
+                continue
+            }
+            if name == ".DS_Store" || name.hasSuffix(".log") { continue }
+            let rel = String(u.standardizedFileURL.path.dropFirst(rootPath.count + 1))
+            guard !rel.isEmpty else { continue }
+            out[rel] = FileSnapshot(size: vals?.fileSize ?? 0,
+                                    mtime: vals?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+        }
+        return out
+    }
+
+    // ── Sync scan — keep the project up to date with new files & folders ─────────
+    struct SyncReport {
+        var newFiles: [String] = []      // files added since the last good build
+        var newFolders: [String] = []    // brand-new top folders those files live in
+        var missing: [String] = []       // in the baseline, gone from disk now
+        var shrunk: [String] = []        // source files at < 50% of their baseline size
+        var untracked: [String] = []     // git's own untracked (not ignored) view
+        var baselineDate: Date? = nil
+        var goodBuilds: Int = 0
+        var hasBaseline: Bool = false
+        var isEmpty: Bool { newFiles.isEmpty && missing.isEmpty && shrunk.isEmpty && untracked.isEmpty }
+    }
+
+    func syncScan(for p: Project) async -> SyncReport {
+        var report = SyncReport()
+        let current = snapshotTree(at: p.url)
+        if let manifest = ManifestStore.load(for: p.id) {
+            report.hasBaseline = true
+            report.baselineDate = manifest.updated
+            report.goodBuilds = manifest.goodBuilds
+            var folders = Set<String>()
+            for (rel, snap) in current {
+                if let old = manifest.files[rel] {
+                    // Shrink check only for source files with a meaningful old size.
+                    let ext = (rel as NSString).pathExtension.lowercased()
+                    if Self.sourceExtensions.contains(ext), old.size > 2_000,
+                       snap.size < old.size / 2 {
+                        report.shrunk.append("\(rel)  (\(old.size) → \(snap.size) bytes)")
+                    }
+                } else {
+                    report.newFiles.append(rel)
+                    if rel.contains("/") { folders.insert(String(rel.split(separator: "/")[0])) }
+                }
+            }
+            for rel in manifest.files.keys where current[rel] == nil {
+                report.missing.append(rel)
+            }
+            report.newFolders = folders.filter { f in !manifest.files.keys.contains { $0.hasPrefix(f + "/") } }.sorted()
+            report.newFiles.sort(); report.missing.sort(); report.shrunk.sort()
+        }
+        // Git's untracked view rounds out the picture even with no baseline yet.
+        let untracked = await runQuiet("git ls-files --others --exclude-standard 2>/dev/null | head -100", cwd: p.url)
+        report.untracked = untracked.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        return report
+    }
+
+    // ── Learn — record the current tree as the newest known-good baseline ────────
+    func learnBaseline(for p: Project, announce: Bool = true) {
+        let files = snapshotTree(at: p.url)
+        var manifest = ManifestStore.load(for: p.id)
+            ?? ProjectManifest(projectPath: p.path, updated: Date(), goodBuilds: 0, files: [:])
+        manifest.projectPath = p.path
+        manifest.updated = Date()
+        manifest.goodBuilds += 1
+        manifest.files = files
+        ManifestStore.save(manifest, for: p.id)
+        if announce {
+            line("🧠 Learned this build: \(files.count) files snapshotted (good build #\(manifest.goodBuilds)).")
+            toast("Baseline updated — build #\(manifest.goodBuilds)", .success)
+        }
+    }
+
+    // ── Regression guard (synchronous — used inline by doCommit) ─────────────────
+    struct RegressionFindings {
+        var missing: [String] = []
+        var shrunk: [String] = []
+        var isEmpty: Bool { missing.isEmpty && shrunk.isEmpty }
+    }
+
+    nonisolated func regressionFindings(for p: Project) -> RegressionFindings {
+        guard let manifest = ManifestStore.load(for: p.id) else { return RegressionFindings() }
+        var out = RegressionFindings()
+        let current = snapshotTree(at: p.url)
+        for (rel, old) in manifest.files {
+            if let now = current[rel] {
+                let ext = (rel as NSString).pathExtension.lowercased()
+                if Self.sourceExtensions.contains(ext), old.size > 2_000, now.size < old.size / 2 {
+                    out.shrunk.append(rel)
+                }
+            } else {
+                out.missing.append(rel)
+            }
+        }
+        out.missing.sort(); out.shrunk.sort()
+        return out
+    }
+
+    // ── Post-commit maintenance: auto clear caches + prune, then learn ───────────
+    func postCommitMaintenance(for p: Project, committed: Bool) async {
+        if settings.autoClearCachesOnCommit {
+            // 1) Invalidate this project's cached status so the next paint is a fresh read.
+            Self.statusCache[p.id] = nil
+            // 2) Drop stale delivery temp extractions left in the system temp dir.
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory
+            if let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+                for item in items where item.lastPathComponent.hasPrefix("bb_") {
+                    try? fm.removeItem(at: item)
+                }
+            }
+            // 3) Prune apply backups to the most recent 10 for this project.
+            let backups = p.url.appendingPathComponent(".buildbuddy-backups")
+            if let dirs = try? fm.contentsOfDirectory(at: backups, includingPropertiesForKeys: [.creationDateKey]) {
+                let sorted = dirs.sorted { a, b in
+                    let da = (try? a.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                    let db = (try? b.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                    return da > db
+                }
+                for old in sorted.dropFirst(10) { try? fm.removeItem(at: old) }
+            }
+            if settings.verboseLogging { line("🧽 Caches cleared for \(p.name) (status cache, temp extractions, old backups pruned).") }
+        }
+        // 4) Learn: a successful commit is by definition a good build.
+        if committed, settings.autoLearnOnCommit {
+            learnBaseline(for: p, announce: settings.verboseLogging)
+        }
+    }
+
+    // ── Clean Project — remove build artifacts inside the selected project ───────
+    // Never touches source, .git, or anything outside the project folder.
+    static let projectJunkDirs: Set<String> = [".build", "build", "DerivedData", "__pycache__"]
+    static let projectJunkFiles: Set<String> = [".DS_Store", "build.log"]
+    static let projectJunkSuffixes = [".o", ".swiftmodule", ".swiftdoc", ".dSYM"]
+
+    nonisolated func cleanProjectCandidates(for p: Project) -> [URL] {
+        var found: [URL] = []
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: p.url, includingPropertiesForKeys: [.isDirectoryKey],
+                                     options: [.skipsPackageDescendants]) else { return [] }
+        for case let u as URL in en {
+            let name = u.lastPathComponent
+            if name == ".git" { en.skipDescendants(); continue }
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if isDir {
+                if Self.projectJunkDirs.contains(name) {
+                    found.append(u); en.skipDescendants()
+                }
+                continue
+            }
+            if Self.projectJunkFiles.contains(name) || Self.projectJunkSuffixes.contains(where: { name.hasSuffix($0) }) {
+                found.append(u)
+            }
+        }
+        return found.sorted { $0.path < $1.path }
+    }
+
+    @discardableResult
+    func cleanProject(for p: Project, dryRun: Bool) async -> Int {
+        let targets = cleanProjectCandidates(for: p)
+        guard !targets.isEmpty else {
+            line("✓ \(p.name) is already clean — no build artifacts found.")
+            toast("Project already clean", .info)
+            return 0
+        }
+        let fm = FileManager.default
+        var removed = 0
+        line("🧹 \(dryRun ? "Would clean" : "Cleaning") \(targets.count) build artifact(s) in \(p.name)…")
+        for t in targets {
+            let rel = t.path.replacingOccurrences(of: p.path + "/", with: "")
+            if dryRun { line("   would remove: \(rel)"); removed += 1; continue }
+            do { try fm.removeItem(at: t); line("   removed: \(rel)"); removed += 1 }
+            catch { line("   ⚠️ couldn't remove \(rel): \(error.localizedDescription)") }
+        }
+        let verb = dryRun ? "Would remove" : "Removed"
+        line("✓ \(verb) \(removed) item(s) from \(p.name).")
+        toast("\(verb) \(removed) artifact\(removed == 1 ? "" : "s")", removed > 0 ? .success : .info)
+        if !dryRun { Self.statusCache[p.id] = nil; await refresh() }
+        return removed
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v2.0 "AURORA" — DESIGN SYSTEM
+// ════════════════════════════════════════════════════════════════════════════
+// One small vocabulary used everywhere: glass surfaces, a soft aurora backdrop,
+// gradient monograms, capsule pills, tile buttons with gentle hover lift, and
+// spring motion that respects the Reduce-motion setting.
+
+enum BB {
+    static let radius: CGFloat = 14
+    static let radiusSmall: CGFloat = 10
+    static let pad: CGFloat = 16
+
+    // Springs (swap to near-instant eases when Reduce motion is on).
+    static func spring(_ reduce: Bool) -> Animation {
+        reduce ? .easeOut(duration: 0.12) : .spring(response: 0.38, dampingFraction: 0.82)
+    }
+    static func quick(_ reduce: Bool) -> Animation {
+        reduce ? .easeOut(duration: 0.08) : .easeOut(duration: 0.16)
+    }
+    static func gentle(_ reduce: Bool) -> Animation {
+        reduce ? .easeOut(duration: 0.12) : .easeInOut(duration: 0.3)
+    }
+
+    // A deterministic gradient per name — powers project monograms and accents.
+    static let gradientPalette: [[Color]] = [
+        [Color(red: 0.42, green: 0.36, blue: 0.98), Color(red: 0.66, green: 0.33, blue: 0.97)], // violet
+        [Color(red: 0.10, green: 0.55, blue: 0.95), Color(red: 0.20, green: 0.80, blue: 0.90)], // ocean
+        [Color(red: 0.95, green: 0.42, blue: 0.35), Color(red: 0.98, green: 0.65, blue: 0.25)], // sunset
+        [Color(red: 0.15, green: 0.70, blue: 0.50), Color(red: 0.45, green: 0.85, blue: 0.40)], // meadow
+        [Color(red: 0.90, green: 0.30, blue: 0.60), Color(red: 0.98, green: 0.50, blue: 0.40)], // rose
+        [Color(red: 0.30, green: 0.45, blue: 0.90), Color(red: 0.30, green: 0.75, blue: 0.95)], // sky
+        [Color(red: 0.80, green: 0.55, blue: 0.20), Color(red: 0.95, green: 0.75, blue: 0.30)], // amber
+        [Color(red: 0.55, green: 0.35, blue: 0.85), Color(red: 0.35, green: 0.60, blue: 0.95)], // twilight
+    ]
+    static func gradient(for name: String) -> LinearGradient {
+        var hash = 0
+        for u in name.unicodeScalars { hash = (hash &* 31 &+ Int(u.value)) & 0x7fffffff }
+        let colors = gradientPalette[hash % gradientPalette.count]
+        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+    static func accentGradient(_ accent: Color) -> LinearGradient {
+        LinearGradient(colors: [accent, accent.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+}
+
+// Frosted glass surface with a hairline gradient border and a soft shadow.
+struct GlassCard: ViewModifier {
+    var radius: CGFloat = BB.radius
+    var elevated: Bool = false
+    func body(content: Content) -> some View {
+        content
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(colors: [Color.white.opacity(0.28), Color.white.opacity(0.04)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(elevated ? 0.18 : 0.08), radius: elevated ? 16 : 8, y: elevated ? 8 : 3)
+    }
+}
+extension View {
+    func glassCard(radius: CGFloat = BB.radius, elevated: Bool = false) -> some View {
+        modifier(GlassCard(radius: radius, elevated: elevated))
+    }
+}
+
+// The soft, slowly drifting aurora backdrop behind everything.
+struct AuroraBackground: View {
+    @Environment(\.colorScheme) private var scheme
+    var reduceMotion: Bool
+    var accent: Color
+    @State private var drift = false
+
+    var body: some View {
+        ZStack {
+            (scheme == .dark ? Color(red: 0.07, green: 0.07, blue: 0.10)
+                             : Color(red: 0.95, green: 0.95, blue: 0.98))
+                .ignoresSafeArea()
+            GeometryReader { geo in
+                let w = geo.size.width, h = geo.size.height
+                ZStack {
+                    blob(accent, size: w * 0.7)
+                        .offset(x: drift ? -w * 0.25 : -w * 0.15, y: drift ? -h * 0.30 : -h * 0.38)
+                    blob(Color.purple, size: w * 0.6)
+                        .offset(x: drift ? w * 0.35 : w * 0.28, y: drift ? -h * 0.15 : -h * 0.05)
+                    blob(Color.teal, size: w * 0.55)
+                        .offset(x: drift ? -w * 0.05 : w * 0.05, y: drift ? h * 0.40 : h * 0.32)
+                }
+                .opacity(scheme == .dark ? 0.30 : 0.20)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 14).repeatForever(autoreverses: true)) { drift = true }
+        }
+    }
+
+    private func blob(_ color: Color, size: CGFloat) -> some View {
+        Circle()
+            .fill(RadialGradient(colors: [color.opacity(0.55), color.opacity(0)],
+                                 center: .center, startRadius: 0, endRadius: size / 2))
+            .frame(width: size, height: size)
+            .blur(radius: 40)
+    }
+}
+
+// Gradient monogram avatar for a project (deterministic color per name).
+struct MonogramAvatar: View {
+    let name: String
+    var size: CGFloat = 30
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+                .fill(BB.gradient(for: name))
+            Text(String(name.prefix(1)).uppercased())
+                .font(.system(size: size * 0.46, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+    }
+}
+
+// A quiet, reusable status capsule used across the header, sheets and cards.
+enum PillTone {
+    case neutral, accent, success, warning, danger
+    var fg: Color {
+        switch self {
+        case .neutral: return .secondary
+        case .accent:  return .accentColor
+        case .success: return .green
+        case .warning: return .orange
+        case .danger:  return .red
+        }
+    }
+    var bg: Color {
+        switch self {
+        case .neutral: return Color.primary.opacity(0.06)
+        case .accent:  return Color.accentColor.opacity(0.14)
+        case .success: return Color.green.opacity(0.14)
+        case .warning: return Color.orange.opacity(0.14)
+        case .danger:  return Color.red.opacity(0.14)
+        }
+    }
+}
+
+struct StatusPill: View {
+    let title: String
+    var systemImage: String?
+    var tone: PillTone
+    var helpText: String?
+    init(_ title: String, systemImage: String? = nil, tone: PillTone = .neutral, help: String? = nil) {
+        self.title = title; self.systemImage = systemImage; self.tone = tone; self.helpText = help
+    }
+    var body: some View {
+        HStack(spacing: 4) {
+            if let systemImage { Image(systemName: systemImage) }
+            Text(title)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(tone.fg)
+        .padding(.horizontal, 9).padding(.vertical, 4)
+        .background(tone.bg, in: Capsule())
+        .overlay(Capsule().strokeBorder(tone.fg.opacity(0.18), lineWidth: 1))
+        .help(helpText ?? title)
+        .transition(.scale(scale: 0.85).combined(with: .opacity))
+    }
+}
+
+// An icon inside a small tinted gradient squircle — the visual anchor of tiles and sheets.
+struct GradientIcon: View {
+    let systemName: String
+    var tint: Color = .accentColor
+    var size: CGFloat = 30
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+                .fill(LinearGradient(colors: [tint.opacity(0.95), tint.opacity(0.65)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.46, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: tint.opacity(0.35), radius: 4, y: 2)
+    }
+}
+
+// Press feedback: gentle scale-down while the mouse is down.
+struct PressableStyle: ButtonStyle {
+    var reduceMotion = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.965 : 1)
+            .animation(BB.quick(reduceMotion), value: configuration.isPressed)
+    }
+}
+
+// The action tile — replaces the old flat ActionButton. Icon in a gradient
+// squircle, hover lift, press scale, optional ⌘⇧ shortcut.
+struct GlassTile: View {
+    let title: String; let icon: String; var tint: Color = .accentColor
+    var key: Character? = nil
+    var reduceMotion: Bool = false
+    let action: () -> Void
+    init(_ title: String, _ icon: String, tint: Color = .accentColor, key: Character? = nil,
+         reduceMotion: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.icon = icon; self.tint = tint; self.key = key
+        self.reduceMotion = reduceMotion; self.action = action
+    }
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        let btn = Button(action: action) {
+            HStack(spacing: 10) {
+                GradientIcon(systemName: icon, tint: tint, size: 26)
+                Text(title).font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+            }
+            .padding(.vertical, 9).padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+                    .strokeBorder(hovering ? tint.opacity(0.45) : Color.white.opacity(0.10), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(hovering ? 0.16 : 0.05), radius: hovering ? 9 : 4, y: hovering ? 4 : 2)
+            .offset(y: hovering && !reduceMotion ? -1.5 : 0)
+            .contentShape(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+        }
+        .buttonStyle(PressableStyle(reduceMotion: reduceMotion))
+        .opacity(isEnabled ? 1 : 0.45)
+        .onHover { h in withAnimation(BB.quick(reduceMotion)) { hovering = h && isEnabled } }
+        .help(title)
+
+        if let key {
+            btn.keyboardShortcut(KeyEquivalent(key), modifiers: [.command, .shift])
+        } else {
+            btn
+        }
+    }
+}
+
+// The prominent gradient capsule button (the Next action, sheet primaries).
+struct HeroButton: View {
+    let title: String; let icon: String
+    var tint: Color = .accentColor
+    var disabled: Bool = false
+    var reduceMotion: Bool = false
+    let action: () -> Void
+    @State private var hovering = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                Text(title).fontWeight(.semibold)
+            }
+            .font(.callout)
+            .foregroundStyle(disabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.white))
+            .padding(.horizontal, 20).padding(.vertical, 10)
+            .background(
+                Capsule().fill(disabled
+                    ? AnyShapeStyle(.quaternary)
+                    : AnyShapeStyle(LinearGradient(colors: [tint, tint.opacity(0.75)],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing)))
+            )
+            .overlay(Capsule().strokeBorder(Color.white.opacity(disabled ? 0 : 0.25), lineWidth: 1))
+            .shadow(color: disabled ? .clear : tint.opacity(hovering ? 0.5 : 0.3),
+                    radius: hovering ? 12 : 7, y: 3)
+            .scaleEffect(hovering && !disabled && !reduceMotion ? 1.02 : 1)
+        }
+        .buttonStyle(PressableStyle(reduceMotion: reduceMotion))
+        .disabled(disabled)
+        .onHover { h in withAnimation(BB.quick(reduceMotion)) { hovering = h } }
+    }
+}
+
+// Shared sheet chrome: gradient icon + title on the left, Done on the right.
+struct SheetHeader: View {
+    let title: String
+    let icon: String
+    var tint: Color = .accentColor
+    var subtitle: String? = nil
+    var onDone: () -> Void
+    var body: some View {
+        HStack(spacing: 12) {
+            GradientIcon(systemName: icon, tint: tint, size: 34)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.title3.bold())
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer()
+            Button("Done") { onDone() }.keyboardShortcut(.defaultAction)
+        }
+        .padding(16)
+    }
+}
+
+// ===== App =====
 
 @main
 struct BuildBuddyApp: App {
@@ -1548,51 +2842,30 @@ struct BuildBuddyApp: App {
     var body: some Scene {
         WindowGroup("BuildBuddy") {
             ContentView().environmentObject(store)
-                .frame(minWidth: 900, minHeight: 600)
-                .onAppear {
-                    // Auto-start the Remote agent if the user left it enabled.
-                    if RemoteAgent.shared.startOnLaunch { RemoteAgent.shared.start() }
-                }
+                .frame(minWidth: 760, minHeight: 500)
         }
         .windowStyle(.titleBar)
-        // Improvement #9 — menu commands with keyboard shortcuts.
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 1080, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Pull Latest") { Task { await store.pull() } }
                     .keyboardShortcut("l", modifiers: [.command])
                 Button("Refresh") { Task { await store.refresh() } }
                     .keyboardShortcut("r", modifiers: [.command])
-                Button("Refresh All Projects") { Task { await store.refreshAll() } }
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
                 Button("Cancel Running Command") { store.cancelRunning() }
                     .keyboardShortcut(".", modifiers: [.command])
                 Button("Check for Updates…") { Task { await store.checkForUpdates() } }
                     .keyboardShortcut("u", modifiers: [.command])
                 Divider()
-                Button("Command Palette…") { NotificationCenter.default.post(name: .bbShowPalette, object: nil) }
-                    .keyboardShortcut("k", modifiers: [.command])
-                Button("Dashboard…") { NotificationCenter.default.post(name: .bbShowDashboard, object: nil) }
-                    .keyboardShortcut("b", modifiers: [.command])
+                Button("Sync Scan") { NotificationCenter.default.post(name: .bbShowSync, object: nil) }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                Button("Clean Project…") { NotificationCenter.default.post(name: .bbShowCleanProject, object: nil) }
+                    .keyboardShortcut("k", modifiers: [.command, .shift])
             }
         }
-        // Native Settings window (⌘,) holding the full Options panel.
         Settings {
             OptionsView().environmentObject(store)
-        }
-        // [New 10] Menu-bar quick actions — control BuildBuddy without raising the window.
-        MenuBarExtra("BuildBuddy", systemImage: "hammer.circle") {
-            Text(store.selected.map { "Project: \($0.name)" } ?? "No project selected")
-            if store.selected != nil {
-                Button("Pull latest") { Task { await store.pull() } }
-                Button("Commit all dirty repos…") { NotificationCenter.default.post(name: .bbShowCommitAll, object: nil) }
-                Button("Refresh all") { Task { await store.refreshAll() } }
-                Divider()
-                Button("Open in Xcode") { Task { await store.openXcode() } }
-                Button("Reveal in Finder") { store.revealInFinder() }
-            }
-            Divider()
-            Button("Show BuildBuddy") { NSApp.activate(ignoringOtherApps: true) }
-            Button("Quit BuildBuddy") { NSApp.terminate(nil) }
         }
     }
 }
@@ -1605,41 +2878,41 @@ struct ContentView: View {
     @State private var showInstructions = false
     @State private var showOptions = false
     @State private var showWhatsNew = false
-    @State private var showRemote = false
-    @State private var foundZip: URL?
 
     var body: some View {
         NavigationSplitView {
             Sidebar()
-                .frame(minWidth: 220)
+                .navigationSplitViewColumnWidth(min: 210, ideal: 258, max: 340)
         } detail: {
-            if store.selected == nil {
-                EmptyDetail(showInstructions: $showInstructions)
-            } else {
-                DetailView(showDoctor: $showDoctor, showInstructions: $showInstructions,
-                           showOptions: $showOptions, showWhatsNew: $showWhatsNew)
+            ZStack {
+                AuroraBackground(reduceMotion: store.settings.reduceMotion,
+                                 accent: store.settings.accentColor)
+                if store.selected == nil {
+                    EmptyDetail(showInstructions: $showInstructions)
+                        .transition(.opacity)
+                } else {
+                    DetailView(showDoctor: $showDoctor, showInstructions: $showInstructions,
+                               showOptions: $showOptions, showWhatsNew: $showWhatsNew)
+                        .transition(.opacity)
+                }
             }
+            .animation(BB.gentle(store.settings.reduceMotion), value: store.selectionID == nil)
         }
-        // [v1.10 UI] Toasts float above everything; accent theming applied app-wide.
         .overlay { ToastOverlay().environmentObject(store) }
         .tint(store.settings.accentColor)
+        .preferredColorScheme(store.settings.colorSchemeOverride)
         .sheet(isPresented: $showDoctor) { DoctorView().environmentObject(store) }
-        .sheet(isPresented: $showInstructions) { InstructionsView() }
-        .sheet(isPresented: $showOptions) { OptionsView().environmentObject(store).frame(width: 600, height: 640) }
+        .sheet(isPresented: $showInstructions) { InstructionsView().environmentObject(store) }
+        .sheet(isPresented: $showOptions) { OptionsView().environmentObject(store).frame(width: 620, height: 660) }
         .sheet(isPresented: $showWhatsNew) { WhatsNewView().environmentObject(store) }
-        .sheet(isPresented: $showRemote) { RemotePanelView().environmentObject(store).frame(width: 560, height: 720) }
-        .onReceive(NotificationCenter.default.publisher(for: .bbShowRemote)) { _ in showRemote = true }
         .onReceive(NotificationCenter.default.publisher(for: .bbAddProject)) { note in
             if let url = note.object as? URL { store.addProject(at: url) }
         }
-        // Downloads auto-detect — polls on the interval from Settings while a project is selected.
         .task(id: store.selectionID) { await watchDownloadsLoop() }
         .onAppear {
             store.restoreLastSelectionIfEnabled()
-            // Pop What's New automatically the first run after an update.
             if store.shouldShowWhatsNew() { showWhatsNew = true }
-            // Start the scheduled auto-pull timer if enabled.
-            store.configureAutoPull()
+            if store.settings.cleanBuildOnLaunch { Task { await store.cleanLingeringBuildFiles() } }
         }
     }
 
@@ -1651,17 +2924,12 @@ struct ContentView: View {
             guard store.settings.watchDownloads, store.selected != nil, !store.busy else { continue }
             if let zip = await store.scanDownloadsForDelivery() {
                 store.line("📥 Found a matching delivery in Downloads: \(zip.lastPathComponent)")
-                // Auto-apply only when auto-commit is on (your choice); otherwise open the preview.
                 if store.settings.autoCommitAndPush && store.settings.autoApplyFound {
                     if let preview = await store.previewDelivery(zip: zip) {
                         await store.commitDelivery(from: preview)
                     }
                 } else {
-                    if let preview = await store.previewDelivery(zip: zip) {
-                        await MainActor.run { foundZip = zip }
-                        // Surface via the normal preview path.
-                        NotificationCenter.default.post(name: .bbShowPreview, object: preview)
-                    }
+                    await MainActor.run { store.pendingDeliveryZip = zip }
                 }
             }
         }
@@ -1670,94 +2938,137 @@ struct ContentView: View {
 
 extension Notification.Name { static let bbShowPreview = Notification.Name("bbShowPreview") }
 extension Notification.Name {
-    static let bbShowPalette = Notification.Name("bbShowPalette")
-    static let bbShowDashboard = Notification.Name("bbShowDashboard")
     static let bbShowCommitAll = Notification.Name("bbShowCommitAll")
     static let bbAddProject = Notification.Name("bbAddProject")
-    static let bbShowRemote = Notification.Name("bbShowRemote")
+    static let bbShowSync = Notification.Name("bbShowSync")
+    static let bbShowCleanProject = Notification.Name("bbShowCleanProject")
 }
 
-// MARK: - Sidebar
+// ===== Sidebar =====
 
 struct Sidebar: View {
     @EnvironmentObject var store: Store
     @State private var search = ""
 
-    // Filtered + split into favorites and the rest.
     private var matches: [Project] {
-        let base = search.isEmpty ? store.projects
+        search.isEmpty ? store.projects
             : store.projects.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.path.localizedCaseInsensitiveContains(search) }
-        return base
     }
-    private var favorites: [Project] { matches.filter { store.isFavorite($0) } }
-    private var others: [Project] { matches.filter { !store.isFavorite($0) } }
 
     var body: some View {
         VStack(spacing: 0) {
-            // [New 1] Project search box.
+            // Brand row.
+            HStack(spacing: 9) {
+                GradientIcon(systemName: "hammer.fill", tint: store.settings.accentColor, size: 26)
+                Text("BuildBuddy")
+                    .font(.system(.headline, design: .rounded).weight(.bold))
+                Spacer()
+                Text("v\(BuildBuddyVersion)")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.6), in: Capsule())
+            }
+            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
+
+            // Glass search field.
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.caption)
                 TextField("Search projects", text: $search).textFieldStyle(.plain).font(.callout)
                 if !search.isEmpty {
-                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    Button { withAnimation(BB.quick(store.settings.reduceMotion)) { search = "" } } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+            .padding(.horizontal, 12).padding(.bottom, 8)
 
-            List(selection: Binding(get: { store.selectionID }, set: { id in
-                if let id, let p = store.projects.first(where: { $0.id == id }) { store.select(p) }
-            })) {
-                if !favorites.isEmpty {
-                    Section("Favorites") {
-                        ForEach(favorites) { p in row(p) }
+            // Project list.
+            ScrollView {
+                VStack(spacing: 3) {
+                    ForEach(matches) { p in row(p) }
+                    if matches.isEmpty {
+                        VStack(spacing: 6) {
+                            Image(systemName: search.isEmpty ? "square.stack.3d.up.slash" : "magnifyingglass")
+                                .font(.title3).foregroundStyle(.tertiary)
+                            Text(search.isEmpty ? "No projects yet — drop a repo folder here or click Add."
+                                               : "No matches.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding(.top, 30).padding(.horizontal, 16)
                     }
                 }
-                Section(favorites.isEmpty ? "Projects" : "All projects") {
-                    ForEach(others) { p in row(p) }
-                }
+                .padding(.horizontal, 10).padding(.vertical, 4)
             }
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
                 handleDrop(providers); return true
             }
 
-            Divider()
-            HStack {
-                Button { pickProjectFolder() } label: { Label("Add", systemImage: "plus") }
+            Divider().opacity(0.4)
+            HStack(spacing: 8) {
+                Button { pickProjectFolder() } label: {
+                    Label("Add Project", systemImage: "plus.circle.fill")
+                        .font(.callout.weight(.medium))
+                }
+                .buttonStyle(.borderless)
                 Spacer()
-                Button(role: .destructive) { store.removeSelected() } label: { Image(systemName: "minus") }
+                Button(role: .destructive) { store.removeSelected() } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless)
                     .disabled(store.selectionID == nil)
+                    .help("Remove the selected project from the list (doesn't delete files)")
             }
-            .padding(8)
+            .padding(.horizontal, 14).padding(.vertical, 10)
         }
+        .background(.regularMaterial)
     }
 
-    // One project row, with a star toggle and a right-click menu.
     @ViewBuilder private func row(_ p: Project) -> some View {
-        HStack {
-            Image(systemName: store.isFavorite(p) ? "star.fill" : "folder.fill")
-                .foregroundStyle(store.isFavorite(p) ? Color.yellow : Color.accentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(p.name).fontWeight(.medium)
-                Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        let isSel = p.id == store.selectionID
+        Button { store.select(p) } label: {
+            HStack(spacing: 10) {
+                MonogramAvatar(name: p.name, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(p.name)
+                        .font(.callout.weight(isSel ? .semibold : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if isSel {
+                        Text((p.path as NSString).abbreviatingWithTildeInPath)
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 4)
+                if isSel {
+                    Circle().fill(store.statusLine == "clean" ? Color.green : Color.orange)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: (store.statusLine == "clean" ? Color.green : Color.orange).opacity(0.6), radius: 3)
+                        .help(store.statusLine == "clean" ? "Clean" : "Uncommitted changes")
+                }
             }
-            Spacer()
-            // [v1.10 UI] status dot: green = clean, orange = uncommitted, gray = unknown.
-            // Populated by Refresh all / Dashboard; selected project also reflects live status.
-            if let snap = store.dashboard[p.id] {
-                Circle().fill(snap.dirty ? Color.orange : Color.green).frame(width: 8, height: 8)
-            } else if p.id == store.selectionID {
-                Circle().fill(store.statusLine == "clean" ? Color.green : Color.orange).frame(width: 8, height: 8)
-            }
+            .padding(.vertical, 6).padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSel ? AnyShapeStyle(Color.accentColor.opacity(0.16)) : AnyShapeStyle(Color.clear))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isSel ? Color.accentColor.opacity(0.35) : .clear, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .tag(p.id)
+        .buttonStyle(.plain)
+        .animation(BB.spring(store.settings.reduceMotion), value: store.selectionID)
+        .help((p.path as NSString).abbreviatingWithTildeInPath)
         .contextMenu {
-            Button(store.isFavorite(p) ? "Unfavorite" : "Favorite") { store.toggleFavorite(p) }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([p.url]) }
         }
     }
 
-    // Native folder picker (SwiftUI .fileImporter shows blank in this unsigned .app).
     private func pickProjectFolder() {
         let panel = NSOpenPanel()
         panel.title = "Choose a project repo folder"
@@ -1783,41 +3094,52 @@ struct Sidebar: View {
     }
 }
 
-struct EmptyDetail: View {
-    @Binding var showInstructions: Bool
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "shippingbox").font(.system(size: 52)).foregroundStyle(.tint)
-            Text("Welcome to BuildBuddy").font(.title.bold())
-            Text("A control panel for your git workflow across all your projects.")
-                .foregroundStyle(.secondary)
+// ===== Welcome (no project selected) =====
 
-            VStack(alignment: .leading, spacing: 10) {
-                quickStep("1", "folder.badge.plus", "Add a project — drag a repo folder into the sidebar, or click the button below.")
-                quickStep("2", "tray.and.arrow.down", "Apply a delivery — drop a Claude zip on the console (or several to queue them).")
-                quickStep("3", "arrow.up.circle", "Commit & push, switch branches, view diffs — all from the buttons.")
+struct EmptyDetail: View {
+    @EnvironmentObject var store: Store
+    @Binding var showInstructions: Bool
+    @State private var appeared = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(BB.accentGradient(store.settings.accentColor))
+                    .frame(width: 84, height: 84)
+                    .blur(radius: 22).opacity(0.55)
+                GradientIcon(systemName: "hammer.fill", tint: store.settings.accentColor, size: 64)
             }
-            .padding(16)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
-            .frame(maxWidth: 460)
+            .scaleEffect(appeared ? 1 : 0.8)
+            .opacity(appeared ? 1 : 0)
+
+            VStack(spacing: 6) {
+                Text("Welcome to BuildBuddy")
+                    .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                Text("Pick a project from the sidebar, or add one — BuildBuddy handles the pull, apply, commit and push loop for you.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 8)
 
             HStack(spacing: 12) {
-                Button { addProject() } label: { Label("Add your first project", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent)
-                Button { showInstructions = true } label: { Label("Read the instructions", systemImage: "book") }
-                    .buttonStyle(.bordered)
+                HeroButton(title: "Add Project", icon: "plus", tint: store.settings.accentColor,
+                           reduceMotion: store.settings.reduceMotion) { addProject() }
+                Button { showInstructions = true } label: {
+                    Label("Instructions", systemImage: "book")
+                        .padding(.horizontal, 6).padding(.vertical, 4)
+                }
+                .buttonStyle(.bordered)
             }
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 10)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
-    }
-
-    @ViewBuilder private func quickStep(_ n: String, _ icon: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(n).font(.caption.bold()).foregroundStyle(.white)
-                .frame(width: 22, height: 22).background(Circle().fill(Color.accentColor))
-            Image(systemName: icon).foregroundStyle(.tint).frame(width: 22)
-            Text(text).font(.callout).fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            withAnimation(store.settings.reduceMotion ? .easeOut(duration: 0.12)
+                          : .spring(response: 0.5, dampingFraction: 0.8).delay(0.05)) { appeared = true }
         }
     }
 
@@ -1831,7 +3153,7 @@ struct EmptyDetail: View {
     }
 }
 
-// MARK: - Detail
+// ===== Detail =====
 
 struct DetailView: View {
     @EnvironmentObject var store: Store
@@ -1845,128 +3167,171 @@ struct DetailView: View {
     @State private var commitText = ""
     @State private var pendingPreview: Store.DeliveryPreview?
     @State private var consoleQuery = ""
+    @State private var inlineMessage = ""
+    @State private var showConsole = false
+    @State private var staleReport: Store.StaleReport?
+    @State private var showStaleSheet = false
+    @State private var syncReport: Store.SyncReport?     // v2.0 — sync scan results
+    @State private var syncBadge = 0                      // new-file count surfaced on the tile
 
     enum ActiveSheet: Identifiable {
-        case commit, newBranch, switchBranch, merge, deliveryPreview
-        case diff, history, dashboard, palette, notes, commitAll
-        case queue, applyHistory
+        case commit, branches, diff, history, commitAll, connectGitHub
+        case applyHistory, cleanFolder, syncInsights, cleanProject
         var id: Int { hashValue }
     }
+
+    private var reduceMotion: Bool { store.settings.reduceMotion }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            guideStrip
-            Divider()
-            actionGrid
-                .padding(16)
-            Divider()
-            console
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    flowCard
+                    toolSections
+                }
+                .padding(BB.pad)
+            }
+            consoleDrawer
+            if showConsole { console }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
+            handleConsoleDrop(providers); return true
+        }
+        .overlay {
+            if dropTargeted { dropOverlay }
         }
         .navigationTitle(store.selected?.name ?? "BuildBuddy")
         .sheet(item: $sheet) { which in
             switch which {
             case .commit:
                 CommitSheet(text: $commitText) { msg in Task { await store.commitPush(message: msg) } }
-            case .newBranch:
-                NewBranchSheet(branches: store.branches) { name, base in Task { await store.newBranch(name, base: base) } }
-            case .switchBranch:
-                PickBranchSheet(title: "Switch to branch", branches: store.branches) { b in Task { await store.switchBranch(b) } }
-            case .merge:
-                PickBranchSheet(title: "Merge branch into \(store.branch)", branches: store.branches) { b in Task { await store.merge(b) } }
-            case .deliveryPreview:
-                EmptyView()   // delivery preview is presented via its own sheet below
+                    .environmentObject(store)
             case .diff:
                 DiffView().environmentObject(store)
             case .history:
                 HistoryView().environmentObject(store)
-            case .dashboard:
-                DashboardView().environmentObject(store)
-            case .palette:
-                CommandPaletteView(onRun: { runPaletteAction($0) }).environmentObject(store)
-            case .notes:
-                NotesView().environmentObject(store)
             case .commitAll:
                 CommitAllView().environmentObject(store)
-            case .queue:
-                QueueView().environmentObject(store)
+            case .branches:
+                BranchOpsSheet(
+                    current: store.branch,
+                    branches: store.branches,
+                    onSwitch: { b in Task { await store.switchBranch(b) } },
+                    onNew: { name, base in Task { await store.newBranch(name, base: base) } },
+                    onMerge: { b in Task { await store.merge(b) } },
+                    onCopySHA: { Task { await store.copyCurrentSHA() } }
+                ).environmentObject(store)
             case .applyHistory:
                 ApplyHistoryView().environmentObject(store)
+            case .cleanFolder:
+                CleanFolderView().environmentObject(store)
+            case .connectGitHub:
+                ConnectGitHubSheet().environmentObject(store)
+            case .syncInsights:
+                SyncInsightsSheet(report: syncReport).environmentObject(store)
+            case .cleanProject:
+                CleanProjectSheet().environmentObject(store)
             }
         }
-        // IMPORTANT: the delivery preview is driven directly by the preview data, not by a
-        // separate enum flag. Presenting it from $sheet while the data lived in a different
-        // @State could race — the sheet would build before pendingPreview propagated and show
-        // an EMPTY box (the "blank dialog" you saw), so Apply never appeared and nothing applied.
         .sheet(item: $pendingPreview) { preview in
             DeliveryPreviewSheet(preview: preview,
                                  autoCommit: store.selected?.autoCommitOnApply ?? true,
                                  onApply: { Task { await store.commitDelivery(from: preview) } },
                                  onCancel: { try? FileManager.default.removeItem(at: preview.tmpDir) })
+                .environmentObject(store)
         }
-        .onChange(of: store.pendingCommitMessage) { _, msg in
+        .onChange(of: store.pendingCommitMessage) { msg in
             if !msg.isEmpty { commitText = msg; sheet = .commit; store.pendingCommitMessage = "" }
         }
         .onReceive(NotificationCenter.default.publisher(for: .bbShowPreview)) { note in
-            if let preview = note.object as? Store.DeliveryPreview {
-                pendingPreview = preview
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .bbShowPalette)) { _ in sheet = .palette }
-        .onReceive(NotificationCenter.default.publisher(for: .bbShowDashboard)) { _ in
-            sheet = .dashboard; Task { await store.refreshAll() }
+            if let preview = note.object as? Store.DeliveryPreview { pendingPreview = preview }
         }
         .onReceive(NotificationCenter.default.publisher(for: .bbShowCommitAll)) { _ in sheet = .commitAll }
+        .onReceive(NotificationCenter.default.publisher(for: .bbShowSync)) { _ in runSyncScan() }
+        .onReceive(NotificationCenter.default.publisher(for: .bbShowCleanProject)) { _ in sheet = .cleanProject }
+        .sheet(isPresented: $showStaleSheet) {
+            StaleReportSheet(report: staleReport ?? Store.StaleReport()).environmentObject(store)
+        }
+        // v2.0 — quiet sync scan when a project is selected: surfaces a badge, never a popup.
+        .task(id: store.selectionID) {
+            syncBadge = 0
+            guard store.settings.syncScanOnSelect, let p = store.selected else { return }
+            let report = await store.syncScan(for: p)
+            syncReport = report
+            syncBadge = report.newFiles.count + report.untracked.count
+            if !report.missing.isEmpty {
+                store.toast("\(report.missing.count) file(s) missing vs last good build", .error)
+            }
+        }
     }
 
+    // ── Header ───────────────────────────────────────────────────────────────────
     private var header: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(store.selected?.name ?? "").font(.title2.bold())
-                    // Version badge — click to open What's New. Always visible so you can tell
-                    // exactly which build is running.
-                    Button { showWhatsNew = true } label: {
-                        Text("v\(BuildBuddyVersion)")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.tint.opacity(0.15), in: Capsule())
+        HStack(spacing: 12) {
+            if let p = store.selected {
+                MonogramAvatar(name: p.name, size: 38)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 7) {
+                        Text(p.name).font(.system(.title2, design: .rounded).weight(.bold))
+                        Button { showWhatsNew = true } label: {
+                            Text("v\(BuildBuddyVersion)")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.tint.opacity(0.15), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("BuildBuddy \(BuildBuddyVersion) — click for What's New & updates")
                     }
-                    .buttonStyle(.plain)
-                    .help("BuildBuddy \(BuildBuddyVersion) — click for What's New & updates")
+                    Text((p.path as NSString).abbreviatingWithTildeInPath)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
-                Text(store.selected?.path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            // Improvement #1 — visible per-project auto-commit toggle.
+
             if let p = store.selected {
                 Toggle(isOn: Binding(
                     get: { p.autoCommitOnApply },
                     set: { v in store.updateSelected { $0.autoCommitOnApply = v } }
                 )) { Text("Auto-commit").font(.caption) }
                 .toggleStyle(.switch)
+                .controlSize(.small)
                 .help("When ON, applying a delivery commits & pushes automatically using its COMMIT_MSG.txt.")
             }
-            Label(store.branch, systemImage: "arrow.triangle.branch")
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(.quaternary, in: Capsule())
-            // [Improvement 2] ahead/behind vs origin.
-            if store.aheadBehind.ahead > 0 || store.aheadBehind.behind > 0 {
-                HStack(spacing: 6) {
-                    if store.aheadBehind.ahead > 0 {
-                        Label("\(store.aheadBehind.ahead)", systemImage: "arrow.up").foregroundStyle(.green)
-                    }
-                    if store.aheadBehind.behind > 0 {
-                        Label("\(store.aheadBehind.behind)", systemImage: "arrow.down").foregroundStyle(.orange)
-                    }
+
+            HStack(spacing: 6) {
+                StatusPill(store.branch, systemImage: "arrow.triangle.branch",
+                           tone: .neutral, help: "Current branch")
+                StatusPill(store.hasRemote ? "GitHub" : "Local",
+                           systemImage: store.hasRemote ? "cloud.fill" : "wifi.slash",
+                           tone: store.hasRemote ? .success : .neutral,
+                           help: store.hasRemote ? "Remote: \(store.remoteURL)" : "No GitHub remote — local git only.")
+                if store.aheadBehind.ahead > 0 {
+                    StatusPill("\(store.aheadBehind.ahead)", systemImage: "arrow.up",
+                               tone: .success, help: "Commits ahead of origin")
                 }
-                .font(.caption2).labelStyle(.titleAndIcon)
-                .help("Commits ahead of / behind origin")
+                if store.aheadBehind.behind > 0 {
+                    StatusPill("\(store.aheadBehind.behind)", systemImage: "arrow.down",
+                               tone: .warning, help: "Commits behind origin")
+                }
+                StatusPill(store.statusLine,
+                           tone: store.statusLine == "clean" ? .success : .warning,
+                           help: store.statusLine == "clean" ? "Working tree is clean" : "Uncommitted changes")
             }
-            Text(store.statusLine)
-                .font(.caption).foregroundStyle(store.statusLine == "clean" ? .green : .orange)
-            RemoteHeaderBadge().environmentObject(store)
-            // [Improvement 8] show WHAT action is running, not just a spinner.
+            .animation(BB.spring(reduceMotion), value: store.statusLine)
+            .animation(BB.spring(reduceMotion), value: store.branch)
+
+            // Theme switcher — cycles System → Light → Dark.
+            Button { cycleTheme() } label: {
+                Image(systemName: themeIcon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Theme: \(store.settings.themeChoice) — click to switch")
+
             if store.busy {
                 HStack(spacing: 5) {
                     ProgressView().scaleEffect(0.6)
@@ -1974,8 +3339,8 @@ struct DetailView: View {
                         Text(store.currentAction).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
+                .transition(.opacity)
             }
-            // FREEZE FIX UI — always-available Cancel while a command runs (also ⌘.).
             if store.canCancel {
                 Button(role: .destructive) { store.cancelRunning() } label: {
                     Label("Cancel", systemImage: "stop.circle.fill")
@@ -1983,155 +3348,345 @@ struct DetailView: View {
                 .help("Stop the running command (⌘.)")
             }
         }
-        .padding(16)
+        .padding(.horizontal, BB.pad).padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) { Divider().opacity(0.4) }
         .task(id: store.selectionID) { await store.updateAheadBehind() }
     }
 
-    private var guideStrip: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles").foregroundStyle(.tint)
-            Text(guideText).font(.callout)
-            Spacer()
-            if !store.lastResult.isEmpty {
-                Text(store.lastResult).font(.caption.bold())
-                    .foregroundStyle(store.lastResult.hasPrefix("✅") ? .green : .red)
-            }
+    private var themeIcon: String {
+        switch store.settings.themeChoice {
+        case "light": return "sun.max.fill"
+        case "dark":  return "moon.fill"
+        default:      return "circle.lefthalf.filled"
         }
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(.tint.opacity(0.08))
+    }
+    private func cycleTheme() {
+        let next: String
+        switch store.settings.themeChoice {
+        case "system": next = "light"
+        case "light":  next = "dark"
+        default:       next = "system"
+        }
+        store.settings.themeChoice = next
+        store.objectWillChange.send()
     }
 
+    // ── Flow card — the "what should I do next" hero ─────────────────────────────
     private var guideText: String {
-        if store.statusLine != "clean" { return "You have uncommitted changes — use Commit & Push, or Apply a delivery." }
-        return "Next: Apply a Claude delivery (drop the zip below), or Pull to get the latest."
+        if !store.hasRemote && store.selected != nil {
+            return "Local-only repo — commit and branch freely. Use Connect to GitHub when you want to back it up."
+        }
+        if store.statusLine != "clean" { return "You have uncommitted changes — press Next to commit them, or apply a delivery first." }
+        if syncBadge > 0 { return "\(syncBadge) new or untracked file(s) since the last good build — open Sync scan to review them." }
+        return "All caught up. Apply a Claude delivery (drop the zip anywhere), or Pull to get the latest."
+    }
+    private var flowTitle: String {
+        if store.busy { return "Working…" }
+        switch store.nextStep {
+        case .applyDelivery: return "Delivery ready to review"
+        case .commit:        return "Changes ready to commit"
+        case .finished:      return store.hasRemote ? "Repo is clean" : "Local repo — clean"
+        }
+    }
+    private var flowIcon: String {
+        if store.busy { return "hourglass" }
+        switch store.nextStep {
+        case .applyDelivery: return "tray.and.arrow.down.fill"
+        case .commit:        return "square.and.pencil"
+        case .finished:      return "checkmark.seal.fill"
+        }
+    }
+    private var flowTint: Color {
+        if store.busy { return store.settings.accentColor }
+        switch store.nextStep {
+        case .applyDelivery: return store.settings.accentColor
+        case .commit:        return .orange
+        case .finished:      return .green
+        }
     }
 
-    private var actionGrid: some View {
-        Group {
-            if store.settings.groupActionGrid {
-                VStack(alignment: .leading, spacing: 14) {
-                    actionSection("Git", gitButtons)
-                    actionSection("Delivery", deliveryButtons)
-                    actionSection("Tools", toolButtons)
+    private var flowCard: some View {
+        let step = store.nextStep
+        let dirty = store.statusLine != "clean" && store.statusLine != ""
+        let showCommitField = dirty || step == .commit
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                GradientIcon(systemName: flowIcon, tint: flowTint, size: 38)
+                    .id(flowIcon)   // re-animate when the state icon changes
+                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(flowTitle).font(.system(.title3, design: .rounded).weight(.bold))
+                    Text(guideText).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            } else {
-                LazyVGrid(columns: gridCols, spacing: 12) {
-                    gitButtons; deliveryButtons; toolButtons
+                Spacer(minLength: 0)
+                if store.busy {
+                    ProgressView().progressViewStyle(.linear).frame(width: 130)
+                }
+            }
+            if showCommitField { commitBar.transition(.opacity.combined(with: .move(edge: .top))) }
+            HStack(spacing: 12) {
+                HeroButton(title: step.title, icon: step.systemImage, tint: flowTint,
+                           disabled: store.selected == nil || store.busy || step == .finished,
+                           reduceMotion: reduceMotion) {
+                    Task {
+                        await store.runNextStep(commitMessage: inlineMessage, applyHandler: { zip in beginPreview(zip) })
+                        inlineMessage = await store.autoCommitMessage()
+                    }
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 14) {
+                    Button { pickDeliveryZip() } label: { Label("Apply delivery", systemImage: "tray.and.arrow.down") }
+                    Button { sheet = .diff } label: { Label("View diff", systemImage: "doc.text.magnifyingglass") }
+                    if store.hasRemote {
+                        Button { Task { await store.pull() } } label: { Label("Pull latest", systemImage: "arrow.down.circle") }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(store.busy || store.selected == nil)
+            }
+        }
+        .padding(BB.pad)
+        .glassCard(elevated: true)
+        .animation(BB.spring(reduceMotion), value: store.nextStep)
+        .animation(BB.spring(reduceMotion), value: store.busy)
+    }
+
+    private var commitBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "square.and.pencil").foregroundStyle(.secondary)
+            TextField("Commit message (auto-filled — edit if you like)", text: $inlineMessage)
+                .textFieldStyle(.plain)
+            Button {
+                Task { inlineMessage = await store.autoCommitMessage() }
+            } label: { Image(systemName: "wand.and.stars").foregroundStyle(.tint) }
+                .buttonStyle(.borderless)
+                .help("Regenerate an automatic message from the current changes")
+                .disabled(store.selected == nil)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+        .task(id: store.selectionID) {
+            if inlineMessage.isEmpty, store.selected != nil {
+                inlineMessage = await store.autoCommitMessage()
+            }
+        }
+    }
+
+    // ── Tool sections ────────────────────────────────────────────────────────────
+    private var gridCols: [GridItem] { [GridItem(.adaptive(minimum: 176), spacing: 10)] }
+
+    @ViewBuilder private func sectionLabel(_ title: String, _ icon: String, _ tint: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundStyle(tint)
+            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary).tracking(0.8)
+        }
+    }
+
+    private var toolSections: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Daily", "bolt.fill", store.settings.accentColor)
+                LazyVGrid(columns: gridCols, spacing: 10) {
+                    if store.hasRemote {
+                        tile("Pull latest", "arrow.down.circle.fill", .green, key: "l") { Task { await store.pull() } }
+                    }
+                    tile("Apply delivery", "tray.and.arrow.down.fill", .blue, key: "d") { pickDeliveryZip() }
+                    tile("View diff", "doc.text.magnifyingglass", .purple, key: "i") { sheet = .diff }
+                    tile("Branches", "arrow.triangle.branch", .indigo) { sheet = .branches }
+                    tile("Open in Xcode", "hammer.fill", .indigo, key: "o") { Task { await store.openXcode() } }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Sync & Learn", "brain.head.profile", .teal)
+                LazyVGrid(columns: gridCols, spacing: 10) {
+                    ZStack(alignment: .topTrailing) {
+                        tile("Sync scan", "arrow.triangle.2.circlepath", .teal) { runSyncScan() }
+                        if syncBadge > 0 {
+                            Text("\(syncBadge)")
+                                .font(.caption2.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Color.teal, in: Capsule())
+                                .offset(x: 6, y: -6)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    tile("Learn this build", "graduationcap.fill", .mint) { learnNow() }
+                    tile("Check stale files", "exclamationmark.magnifyingglass", .yellow) { runStaleScan() }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Version & Build", "number", .green)
+                LazyVGrid(columns: gridCols, spacing: 10) {
+                    tile("Bump build", "hammer.circle.fill", .orange) { Task { await store.bumpBuild() } }
+                    tile("Bump version", "1.circle.fill", .green) { Task { await store.bumpVersion() } }
+                    tile("Standardize app", "checkmark.seal.fill", .blue) { confirmStandardize() }
+                    tile("Reset to 1.0 / 1", "arrow.counterclockwise.circle", .gray) { confirmResetVersion() }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Clean", "sparkles", .red)
+                LazyVGrid(columns: gridCols, spacing: 10) {
+                    tile("Clean project", "wand.and.stars", .red, key: "k") { sheet = .cleanProject }
+                    tile("Clean folder…", "folder.badge.minus", .red, key: "e") { sheet = .cleanFolder }
+                    tile("Clean Downloads…", "arrow.down.circle.dotted", .red) { confirmCleanDownloads() }
+                    tile("Clean build files", "trash.slash.fill", .red) { Task { await store.cleanLingeringBuildFiles() } }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Repo & Tools", "wrench.and.screwdriver.fill", .orange)
+                LazyVGrid(columns: gridCols, spacing: 10) {
+                    tile("Commit history", "clock.arrow.circlepath", .brown) { sheet = .history }
+                    tile("Apply history", "clock.badge.checkmark.fill", .brown) { sheet = .applyHistory }
+                    tile("Commit all dirty", "square.stack.3d.up.fill", .orange) { sheet = .commitAll }
+                    if store.hasRemote {
+                        tile("Push", "arrow.up.circle.fill", .green, key: "p") { Task { await store.pushOnly() } }
+                        tile("Fetch", "arrow.down.left.circle.fill", .cyan) { Task { await store.fetch() } }
+                        tile("Open on GitHub", "safari.fill", .blue) { Task { await store.openOnGitHub() } }
+                    } else {
+                        tile("Connect to GitHub…", "link.badge.plus", .green) { sheet = .connectGitHub }
+                    }
+                    tile("Deploy Worker", "cloud.fill", .teal) { Task { await store.deployWorker() } }
+                    tile("Refresh", "arrow.clockwise", .gray, key: "r") { Task { await store.refresh() } }
+                    tile("Reveal in Finder", "folder.fill", .gray) { store.revealInFinder() }
+                    tile("Discard changes", "arrow.uturn.backward.circle.fill", .red) { confirmDiscard() }
+                    tile("Doctor", "stethoscope", .pink) { showDoctor = true }
+                    tile("Instructions", "book.fill", .orange) { showInstructions = true }
+                    tile("Options", "gearshape.fill", .gray, key: ",") { showOptions = true }
+                    tile("Check for updates", "arrow.down.app.fill", .green) { showWhatsNew = true; Task { await store.checkForUpdates() } }
                 }
             }
         }
     }
 
-    private var gridCols: [GridItem] { [GridItem(.adaptive(minimum: 170), spacing: 12)] }
+    private func tile(_ title: String, _ icon: String, _ tint: Color, key: Character? = nil,
+                      action: @escaping () -> Void) -> GlassTile {
+        GlassTile(title, icon, tint: tint, key: key, reduceMotion: reduceMotion, action: action)
+    }
 
-    @ViewBuilder private func actionSection(_ title: String, _ content: some View) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
-            LazyVGrid(columns: gridCols, spacing: 10) { content }
+    // ── Console drawer ───────────────────────────────────────────────────────────
+    private var consoleDrawer: some View {
+        HStack(spacing: 12) {
+            Button {
+                withAnimation(BB.gentle(reduceMotion)) { showConsole.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "terminal").font(.system(size: 12, weight: .semibold))
+                    Text("Console").font(.caption.bold())
+                    Image(systemName: "chevron.up")
+                        .font(.caption2.weight(.bold))
+                        .rotationEffect(.degrees(showConsole ? 180 : 0))
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help(showConsole ? "Hide console" : "Show console")
+
+            if !showConsole {
+                if store.busy {
+                    ProgressView().progressViewStyle(.linear).frame(maxWidth: 200)
+                    Text(store.currentAction.isEmpty ? "Working…" : store.currentAction)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                } else if !store.lastResult.isEmpty {
+                    Text(store.lastResult).font(.caption)
+                        .foregroundStyle(store.lastResult.hasPrefix("✅") ? .green : (store.lastResult.hasPrefix("❌") ? .red : .secondary))
+                        .lineLimit(1)
+                        .transition(.opacity)
+                }
+            }
+            Spacer()
+            if showConsole {
+                Button(action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(store.console, forType: .string)
+                }, label: { Image(systemName: "doc.on.doc") })
+                    .buttonStyle(.borderless).help("Copy console")
+                Button(action: { store.saveConsole() }, label: { Image(systemName: "square.and.arrow.down") })
+                    .buttonStyle(.borderless).help("Save console")
+                Button(action: { store.clearConsole() }, label: { Image(systemName: "trash") })
+                    .buttonStyle(.borderless).help("Clear console")
+            }
         }
-    }
-
-    @ViewBuilder private var gitButtons: some View {
-        ActionButton("Pull latest", "arrow.down.circle", key: "l") { Task { await store.pull() } }
-        ActionButton("Commit & Push", "arrow.up.circle", key: "p") { commitText = ""; sheet = .commit }
-        ActionButton("Fetch", "arrow.down.left.circle", tint: .cyan) { Task { await store.fetch() } }
-        ActionButton("Switch branch", "arrow.left.arrow.right") { sheet = .switchBranch }
-        ActionButton("New branch", "plus.square.on.square", key: "n") { sheet = .newBranch }
-        ActionButton("Merge branch", "arrow.triangle.merge") { sheet = .merge }
-        ActionButton("View Diff", "doc.text.magnifyingglass", tint: .purple, key: "i") { sheet = .diff }
-        ActionButton("Commit history", "clock.arrow.circlepath", tint: .brown) { sheet = .history }
-        ActionButton("Stash", "tray.and.arrow.up", tint: .yellow) { Task { await store.stash() } }
-        ActionButton("Unstash", "tray.and.arrow.down.fill", tint: .yellow) { Task { await store.unstash() } }
-        ActionButton("Discard changes", "arrow.uturn.backward", tint: .red) { confirmDiscard() }
-        ActionButton("Copy SHA", "number", tint: .gray) { Task { await store.copyCurrentSHA() } }
-        ActionButton("Open on GitHub", "safari", tint: .blue) { Task { await store.openOnGitHub() } }
-    }
-
-    @ViewBuilder private var deliveryButtons: some View {
-        ActionButton("Apply delivery", "tray.and.arrow.down", tint: .blue, key: "d") { pickDeliveryZip() }
-        ActionButton("Delivery queue", "square.stack.3d.down.right", tint: .blue) { sheet = .queue }
-        ActionButton("Apply history", "clock.badge.checkmark", tint: .brown) { sheet = .applyHistory }
-        ActionButton("Deploy Worker", "cloud", tint: .teal) { Task { await store.deployWorker() } }
-        ActionButton("Open in Xcode", "hammer", tint: .indigo, key: "o") { Task { await store.openXcode() } }
-    }
-
-    @ViewBuilder private var toolButtons: some View {
-        ActionButton("Dashboard", "square.grid.2x2", tint: .indigo, key: "b") { sheet = .dashboard; Task { await store.refreshAll() } }
-        ActionButton("Refresh all", "arrow.clockwise.circle", tint: .green) { Task { await store.refreshAll() } }
-        ActionButton("Command palette", "command", tint: .pink, key: "k") { sheet = .palette }
-        ActionButton("Commit all dirty", "square.stack.3d.up", tint: .orange) { sheet = .commitAll }
-        ActionButton("Notes", "note.text", tint: .yellow) { sheet = .notes }
-        ActionButton("Doctor", "stethoscope", tint: .pink) { showDoctor = true }
-        ActionButton("Instructions", "book", tint: .orange) { showInstructions = true }
-        ActionButton("Options", "gearshape", tint: .gray, key: "," ) { showOptions = true }
-        ActionButton("Check for Updates", "arrow.down.app", tint: .green) { showWhatsNew = true; Task { await store.checkForUpdates() } }
-        ActionButton("Remote", "iphone.radiowaves.left.and.right", tint: .mint, key: "e") { NotificationCenter.default.post(name: .bbShowRemote, object: nil) }
-        ActionButton("Reveal in Finder", "folder") { store.revealInFinder() }
-        ActionButton("Refresh", "arrow.clockwise", key: "r") { Task { await store.refresh() } }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Divider().opacity(0.4) }
     }
 
     private var console: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Resize handle (drag to change console height). Hidden when collapsed.
-            if !store.settings.consoleCollapsed {
-                ConsoleResizeHandle(height: Binding(
-                    get: { store.settings.consoleHeight },
-                    set: { store.settings.consoleHeight = min(600, max(120, $0)) }
-                ))
-            }
+            ConsoleResizeHandle(height: Binding(
+                get: { store.settings.consoleHeight },
+                set: { store.settings.consoleHeight = min(600, max(120, $0)) }
+            ))
             HStack {
-                Button { store.settings.consoleCollapsed.toggle() } label: {
-                    Image(systemName: store.settings.consoleCollapsed ? "chevron.up" : "chevron.down")
-                }.buttonStyle(.borderless).help(store.settings.consoleCollapsed ? "Expand console" : "Collapse console")
-                Text("Console").font(.caption.bold()).foregroundStyle(.secondary)
-                if !store.zipQueue.isEmpty {
-                    Button { sheet = .queue } label: {
-                        Label("\(store.zipQueue.count) queued", systemImage: "square.stack.3d.down.right")
-                            .font(.caption2)
-                    }.buttonStyle(.borderless)
-                }
+                Text("CONSOLE").font(.caption2.bold()).foregroundStyle(.secondary).tracking(0.8)
                 Spacer()
-                if !store.settings.consoleCollapsed {
-                    TextField("Filter…", text: $consoleQuery)
-                        .textFieldStyle(.roundedBorder).frame(width: 140).font(.caption)
-                    Button("Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(store.console, forType: .string)
-                    }.buttonStyle(.borderless).font(.caption)
-                    Button("Save") { store.saveConsole() }.buttonStyle(.borderless).font(.caption)
-                    Button("Clear") { store.clearConsole() }.buttonStyle(.borderless).font(.caption)
-                }
+                TextField("Filter…", text: $consoleQuery)
+                    .textFieldStyle(.roundedBorder).frame(width: 160).font(.caption)
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            if !store.settings.consoleCollapsed {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(displayedConsole)
-                            .font(.system(.caption, design: store.settings.monospaceConsole ? .monospaced : .default))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(12)
-                            .id("end")
-                    }
-                    .onChange(of: store.console) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(displayedConsole)
+                        .font(.system(.caption, design: store.settings.monospaceConsole ? .monospaced : .default))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .id("end")
                 }
-                .frame(height: store.settings.consoleHeight)
-                .background(Color(nsColor: .textBackgroundColor))
+                .onChange(of: store.console) { _ in proxy.scrollTo("end", anchor: .bottom) }
             }
+            .frame(height: store.settings.consoleHeight)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.75))
         }
-        .overlay(alignment: .center) {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 3)
-                    .overlay(Text("Drop one or more delivery zips").font(.title3.bold()))
-                    .padding(8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private var dropOverlay: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+            VStack(spacing: 12) {
+                GradientIcon(systemName: "tray.and.arrow.down.fill", tint: store.settings.accentColor, size: 56)
+                Text("Drop the delivery zip").font(.title3.bold())
+                Text("It will be previewed before anything is applied.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
+            .padding(30)
+            .glassCard(elevated: true)
         }
-        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
-            handleConsoleDrop(providers); return true
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+
+    // ── Actions & confirmations ──────────────────────────────────────────────────
+    private func runSyncScan() {
+        guard let p = store.selected else { return }
+        Task {
+            store.line("🔎 Sync scan: comparing \(p.name) against the last good build…")
+            let report = await store.syncScan(for: p)
+            await MainActor.run {
+                syncReport = report
+                syncBadge = report.newFiles.count + report.untracked.count
+                sheet = .syncInsights
+            }
         }
     }
 
-    // Multi-zip drop: 1 zip → preview & apply as before; 2+ zips → enqueue them.
+    private func learnNow() {
+        guard let p = store.selected else { return }
+        store.learnBaseline(for: p)
+    }
+
     private func handleConsoleDrop(_ providers: [NSItemProvider]) {
         let group = DispatchGroup()
         var urls: [URL] = []
@@ -2147,18 +3702,13 @@ struct DetailView: View {
         }
         group.notify(queue: .main) {
             guard !urls.isEmpty else { return }
-            if urls.count == 1 {
-                beginPreview(urls[0])
-            } else {
-                store.enqueueZips(urls)
-                sheet = .queue
+            if urls.count > 1 {
+                store.line("Dropped \(urls.count) zips — applying the first; drop one at a time for the rest.")
             }
+            beginPreview(urls[0])
         }
     }
 
-    // Native open panel for the delivery zip. SwiftUI's .fileImporter renders as a blank
-    // panel in this unsigned, hand-built .app, so we drive NSOpenPanel directly (same as the
-    // console Save panel, which works). This is the fix for the "empty dialog" on Apply delivery.
     private func pickDeliveryZip() {
         let panel = NSOpenPanel()
         panel.title = "Choose a delivery zip"
@@ -2166,14 +3716,39 @@ struct DetailView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        // Default to ~/Downloads since that's where deliveries usually land.
         panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         if panel.runModal() == .OK, let url = panel.url {
             beginPreview(url)
         }
     }
 
-    // Confirm before a destructive discard of uncommitted work.
+    private func confirmCleanDownloads() {
+        let alert = NSAlert()
+        alert.messageText = "Clean the Downloads folder?"
+        alert.informativeText = "Removes delivery .zip files (and their extracted folders) that pile up in ~/Downloads. Choose what to remove."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Zips + extracted folders")
+        alert.addButton(withTitle: "Zips only")
+        alert.addButton(withTitle: "Cancel")
+        let r = alert.runModal()
+        if r == .alertFirstButtonReturn { Task { await store.cleanDownloads(zipsOnly: false, dryRun: false) } }
+        else if r == .alertSecondButtonReturn { Task { await store.cleanDownloads(zipsOnly: true, dryRun: false) } }
+    }
+
+    private func runStaleScan() {
+        guard let p = store.selected else { return }
+        Task {
+            store.line("🔎 Scanning for stale builds, duplicate names, and missed files…")
+            let report = await store.scanStaleFiles(for: p)
+            await MainActor.run {
+                staleReport = report
+                showStaleSheet = true
+                if report.isEmpty { store.toast("No stale files found", .success) }
+                else { store.toast("Found items to review", .info) }
+            }
+        }
+    }
+
     private func confirmDiscard() {
         let alert = NSAlert()
         alert.messageText = "Discard all uncommitted changes?"
@@ -2184,26 +3759,36 @@ struct DetailView: View {
         if alert.runModal() == .alertFirstButtonReturn { Task { await store.discardChanges() } }
     }
 
-    // Map a command-palette selection to an action.
-    private func runPaletteAction(_ id: String) {
-        switch id {
-        case "pull": Task { await store.pull() }
-        case "commit": commitText = ""; sheet = .commit
-        case "fetch": Task { await store.fetch() }
-        case "diff": sheet = .diff
-        case "history": sheet = .history
-        case "dashboard": sheet = .dashboard; Task { await store.refreshAll() }
-        case "stash": Task { await store.stash() }
-        case "unstash": Task { await store.unstash() }
-        case "xcode": Task { await store.openXcode() }
-        case "github": Task { await store.openOnGitHub() }
-        case "copysha": Task { await store.copyCurrentSHA() }
-        case "refreshall": Task { await store.refreshAll() }
-        case "notes": sheet = .notes
-        case "commitall": sheet = .commitAll
-        case "doctor": showDoctor = true
-        case "options": showOptions = true
-        default: break
+    private func confirmResetVersion() {
+        let alert = NSAlert()
+        alert.messageText = "Reset version and build to the standard baseline?"
+        alert.informativeText = "Sets CFBundleShortVersionString to 1.0 and CFBundleVersion to 1 in this project's Info.plist, retiring its old numbers. Use this once when migrating an app to the shared standard, then commit."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset to 1.0 / build 1")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { Task { await store.resetVersionBuild() } }
+    }
+
+    private func confirmStandardize() {
+        Task {
+            guard let p = store.selected else { return }
+            let info = await store.locateVersionFiles(for: p)
+            let already = store.isStandardized(info)
+            await MainActor.run {
+                let alert = NSAlert()
+                alert.messageText = already
+                    ? "This app is already standardized."
+                    : "Standardize this app to the shared scheme?"
+                let where_ = [info.hasPbxKeys ? "Xcode project" : nil, info.plistPath != nil ? "Info.plist" : nil]
+                    .compactMap { $0 }.joined(separator: " + ")
+                alert.informativeText = already
+                    ? "It's on version \(info.version), build \(info.build). Standardizing will NOT reset your numbers — it will just add a timestamped What's New entry. Continue?"
+                    : "Sets version 1.0 and build 1 in \(where_.isEmpty ? "the app" : where_), and adds a timestamped What's New entry (MM:DD:YY HH:MM). Then commit. Continue?"
+                alert.alertStyle = already ? .informational : .warning
+                alert.addButton(withTitle: already ? "Add entry" : "Standardize")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn { Task { await store.standardizeApp() } }
+            }
         }
     }
 
@@ -2214,14 +3799,10 @@ struct DetailView: View {
         return lines.joined(separator: "\n")
     }
 
-    // Improvement #4/#5 — preview a zip first, then let the user confirm.
-    // When "confirm before apply" is off in Options, skip the sheet and apply immediately.
     private func beginPreview(_ url: URL) {
         Task {
             if let preview = await store.previewDelivery(zip: url) {
                 if store.settings.confirmBeforeApply {
-                    // Setting pendingPreview is enough — the sheet is bound to it directly,
-                    // so the data is always present when the sheet builds (no empty box).
                     await MainActor.run { pendingPreview = preview }
                 } else {
                     await store.commitDelivery(from: preview)
@@ -2231,216 +3812,433 @@ struct DetailView: View {
     }
 }
 
-struct ActionButton: View {
-    let title: String; let icon: String; var tint: Color = .accentColor
-    var key: Character? = nil
-    let action: () -> Void
-    init(_ title: String, _ icon: String, tint: Color = .accentColor, key: Character? = nil, action: @escaping () -> Void) {
-        self.title = title; self.icon = icon; self.tint = tint; self.key = key; self.action = action
-    }
-    var body: some View {
-        let btn = Button(action: action) {
-            HStack {
-                Image(systemName: icon).foregroundStyle(tint).frame(width: 22)
-                Text(title)
-                Spacer()
-            }
-            .padding(.vertical, 10).padding(.horizontal, 12)
-            .frame(maxWidth: .infinity)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
-        }
-        .buttonStyle(.plain)
-        if let key {
-            btn.keyboardShortcut(KeyEquivalent(key), modifiers: [.command, .shift])
-        } else {
-            btn
-        }
-    }
-}
-
-// MARK: - Delivery preview sheet (improvement #4)
+// ===== Sheets =====
 
 struct DeliveryPreviewSheet: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
     let preview: Store.DeliveryPreview
     let autoCommit: Bool
     let onApply: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Review delivery before applying").font(.title3.bold())
-            Text("Only changed or new files are applied. Identical files are skipped, so a delivery is never re-applied. A backup of overwritten files is made first.")
-                .font(.caption).foregroundStyle(.secondary)
-
-            // Already-applied banner.
-            if preview.nothingToApply && !preview.files.isEmpty {
-                Label("This delivery is already applied — all \(preview.files.count) file(s) are identical to your repo. Nothing to do.",
-                      systemImage: "checkmark.circle.fill")
-                    .font(.callout).foregroundStyle(.green)
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Review delivery", icon: "tray.and.arrow.down.fill",
+                        tint: .blue,
+                        subtitle: "Only changed or new files are applied — identical files are skipped.") {
+                onCancel(); dismiss()
             }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    StatusPill("\(preview.changedFiles.count) to apply", systemImage: "square.and.pencil",
+                               tone: preview.changedFiles.isEmpty ? .neutral : .warning)
+                    if !preview.newFiles.isEmpty {
+                        StatusPill("\(preview.newFiles.count) new", systemImage: "plus", tone: .accent)
+                    }
+                    StatusPill("\(preview.unchangedFiles.count) unchanged", systemImage: "equal", tone: .neutral)
+                    StatusPill(preview.hasCommitScript ? "commit.sh" : "no commit.sh",
+                               systemImage: "terminal",
+                               tone: preview.hasCommitScript ? .success : .neutral)
+                    Spacer()
+                }
 
-            GroupBox("Files — \(preview.changedFiles.count) to apply, \(preview.unchangedFiles.count) unchanged") {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        if preview.files.isEmpty {
-                            Text("No files found in the drop.").foregroundStyle(.secondary)
-                        }
-                        ForEach(preview.files, id: \.self) { f in
-                            HStack(spacing: 6) {
-                                if preview.newFiles.contains(f) {
-                                    Text("NEW").font(.caption2.bold()).foregroundStyle(.blue).frame(width: 42, alignment: .leading)
-                                } else if preview.changedFiles.contains(f) {
-                                    Text("CHG").font(.caption2.bold()).foregroundStyle(.orange).frame(width: 42, alignment: .leading)
-                                } else {
-                                    Text("—").font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
-                                }
-                                Text(f).font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(preview.unchangedFiles.contains(f) ? .secondary : .primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                if preview.nothingToApply && !preview.files.isEmpty {
+                    Label("Already applied — all \(preview.files.count) file(s) match your repo. Nothing to do.",
+                          systemImage: "checkmark.circle.fill")
+                        .font(.callout).foregroundStyle(.green)
+                }
+
+                reviewCard("Files") {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            if preview.files.isEmpty {
+                                Text("No files found in the drop.").font(.caption).foregroundStyle(.secondary)
                             }
+                            ForEach(preview.files, id: \.self) { f in
+                                HStack(spacing: 6) {
+                                    if preview.newFiles.contains(f) {
+                                        Text("NEW").font(.caption2.bold()).foregroundStyle(.blue).frame(width: 42, alignment: .leading)
+                                    } else if preview.changedFiles.contains(f) {
+                                        Text("CHG").font(.caption2.bold()).foregroundStyle(.orange).frame(width: 42, alignment: .leading)
+                                    } else {
+                                        Text("—").font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+                                    }
+                                    Text(f).font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(preview.unchangedFiles.contains(f) ? .secondary : .primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }.padding(8)
+                    }.frame(height: 150)
+                }
+
+                reviewCard("Commit message") {
+                    ScrollView {
+                        Text(preview.commitMessage.isEmpty ? "(none — you'll commit manually)" : preview.commitMessage)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(preview.commitMessage.isEmpty ? .secondary : .primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }.frame(height: 80)
+                }
+
+                if preview.nothingToApply {
+                    EmptyView()
+                } else if !preview.messageProblems.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label("Commit message is shell-unsafe — it'll open for manual review instead of auto-committing.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                        ForEach(preview.messageProblems, id: \.self) { p in
+                            Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
                         }
-                    }.padding(6)
-                }.frame(height: 140)
-            }
-
-            GroupBox("Commit message") {
-                ScrollView {
-                    Text(preview.commitMessage.isEmpty ? "(none — you'll commit manually)" : preview.commitMessage)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(6)
-                }.frame(height: 90)
-            }
-
-            // Safety + auto-commit banner.
-            if preview.nothingToApply {
-                EmptyView()
-            } else if !preview.messageProblems.isEmpty {
-                Label("Commit message is shell-unsafe — it will be opened for manual review instead of auto-committing.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-                ForEach(preview.messageProblems, id: \.self) { p in
-                    Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                } else if autoCommit && !preview.commitMessage.isEmpty {
+                    Label("Auto-commit is ON — applying will commit & push automatically.",
+                          systemImage: "checkmark.seal.fill")
+                        .font(.caption).foregroundStyle(.green)
+                } else {
+                    Label("Auto-commit is OFF — you'll see the commit sheet after applying.",
+                          systemImage: "hand.raised.fill")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-            } else if autoCommit && !preview.commitMessage.isEmpty {
-                Label("Auto-commit is ON — applying will commit & push automatically.",
-                      systemImage: "checkmark.seal.fill")
-                    .font(.caption).foregroundStyle(.green)
-            } else {
-                Label("Auto-commit is OFF — you'll be shown the commit sheet after applying.",
-                      systemImage: "hand.raised.fill")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
 
-            HStack {
-                if preview.hasCommitScript {
-                    Label("commit.sh bundled", systemImage: "terminal").font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(preview.nothingToApply ? "Close" : "Cancel") { onCancel(); dismiss() }
-                if !preview.nothingToApply {
-                    Button("Apply \(preview.changedFiles.count) file\(preview.changedFiles.count == 1 ? "" : "s")") { onApply(); dismiss() }
-                        .keyboardShortcut(.defaultAction)
+                HStack(spacing: 10) {
+                    Spacer()
+                    Button(preview.nothingToApply ? "Close" : "Cancel") { onCancel(); dismiss() }
+                    if !preview.nothingToApply {
+                        HeroButton(title: "Apply \(preview.changedFiles.count) file\(preview.changedFiles.count == 1 ? "" : "s")",
+                                   icon: "checkmark", tint: .blue,
+                                   reduceMotion: store.settings.reduceMotion) {
+                            onApply(); dismiss()
+                        }
+                    }
                 }
             }
+            .padding(BB.pad)
         }
-        .padding(20).frame(width: 560)
+        .frame(width: 580)
+    }
+
+    @ViewBuilder private func reviewCard(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary).tracking(0.8)
+            content()
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        }
     }
 }
-
-// MARK: - Sheets
 
 struct CommitSheet: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
     @Binding var text: String
     let onCommit: (String) -> Void
 
-    // Improvement #3 — live safety feedback in the commit sheet.
     private var problems: [String] { CommitSafety.problems(in: text) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Commit & Push").font(.title3.bold())
-            Text("Commit message").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $text).frame(height: 120)
-                .font(.system(.body, design: .monospaced))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(problems.isEmpty ? Color.secondary.opacity(0.3) : .red))
-            if problems.isEmpty {
-                Label("SAFE for BuildBuddy commit", systemImage: "checkmark.circle.fill")
-                    .font(.caption).foregroundStyle(.green)
-            } else {
-                Label("Unsafe characters — fix before pushing:", systemImage: "xmark.circle.fill")
-                    .font(.caption).foregroundStyle(.red)
-                ForEach(problems, id: \.self) { p in
-                    Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Commit & Push", icon: "checkmark.circle.fill", tint: .green) { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("COMMIT MESSAGE").font(.caption2.bold()).foregroundStyle(.secondary).tracking(0.8)
+                TextEditor(text: $text).frame(height: 120)
+                    .font(.system(.body, design: .monospaced))
+                    .padding(4)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+                        .strokeBorder(problems.isEmpty ? Color.white.opacity(0.12) : Color.red.opacity(0.8), lineWidth: 1))
+                if problems.isEmpty {
+                    Label("Safe for BuildBuddy commit", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                } else {
+                    Label("Unsafe characters — fix before pushing:", systemImage: "xmark.circle.fill")
+                        .font(.caption).foregroundStyle(.red)
+                    ForEach(problems, id: \.self) { p in
+                        Text("• \(p)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                    HeroButton(title: "Commit & Push", icon: "arrow.up.circle.fill", tint: .green,
+                               disabled: text.trimmingCharacters(in: .whitespaces).isEmpty || !problems.isEmpty,
+                               reduceMotion: store.settings.reduceMotion) {
+                        onCommit(text); dismiss()
+                    }
                 }
             }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Commit & Push") { onCommit(text); dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty || !problems.isEmpty)
-            }
+            .padding(BB.pad)
         }
-        .padding(20).frame(width: 480)
+        .frame(width: 500)
     }
 }
 
-struct NewBranchSheet: View {
+// Combined branch operations: switch, create, merge, and copy SHA in one sheet.
+struct BranchOpsSheet: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    let current: String
     let branches: [String]
-    let onCreate: (String, String) -> Void
-    @State private var name = ""
-    @State private var base = "main"
+    let onSwitch: (String) -> Void
+    let onNew: (String, String) -> Void
+    let onMerge: (String) -> Void
+    let onCopySHA: () -> Void
+
+    @State private var switchTo = ""
+    @State private var newName = ""
+    @State private var newBase = ""
+    @State private var mergeFrom = ""
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("New branch").font(.title3.bold())
-            TextField("e.g. feature/widgets", text: $name)
-            Picker("From base", selection: $base) {
-                ForEach(branches.isEmpty ? ["main"] : branches, id: \.self) { Text($0) }
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Branches", icon: "arrow.triangle.branch", tint: .indigo,
+                        subtitle: "Currently on \(current)") { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 14) {
+                card("Switch branch", "arrow.left.arrow.right") {
+                    HStack {
+                        Picker("", selection: $switchTo) {
+                            ForEach(branches, id: \.self) { Text($0) }
+                        }.labelsHidden()
+                        Button("Switch") { onSwitch(switchTo.isEmpty ? (branches.first ?? "") : switchTo); dismiss() }
+                            .disabled(branches.isEmpty)
+                    }
+                }
+                card("New branch", "plus.circle") {
+                    HStack {
+                        TextField("new-branch-name", text: $newName).textFieldStyle(.roundedBorder)
+                        Picker("from", selection: $newBase) {
+                            Text("current (\(current))").tag("")
+                            ForEach(branches, id: \.self) { Text($0).tag($0) }
+                        }
+                        Button("Create") {
+                            let base = newBase.isEmpty ? current : newBase
+                            onNew(newName.trimmingCharacters(in: .whitespaces), base); dismiss()
+                        }.disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                card("Merge into \(current)", "arrow.triangle.merge") {
+                    HStack {
+                        Picker("", selection: $mergeFrom) {
+                            ForEach(branches.filter { $0 != current }, id: \.self) { Text($0) }
+                        }.labelsHidden()
+                        Button("Merge") { if !mergeFrom.isEmpty { onMerge(mergeFrom) }; dismiss() }
+                            .disabled(branches.filter { $0 != current }.isEmpty)
+                    }
+                }
+                HStack {
+                    Button { onCopySHA(); dismiss() } label: { Label("Copy current SHA", systemImage: "doc.on.doc") }
+                    Spacer()
+                }
             }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Create & Push") { onCreate(name, base); dismiss() }
-                    .keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
+            .padding(BB.pad)
         }
-        .padding(20).frame(width: 420)
+        .frame(width: 500)
+        .onAppear {
+            switchTo = current.isEmpty ? (branches.first ?? "") : current
+            mergeFrom = branches.first { $0 != current } ?? ""
+        }
+    }
+
+    @ViewBuilder private func card(_ title: String, _ icon: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon).font(.caption.bold()).foregroundStyle(.secondary)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
 }
 
-struct PickBranchSheet: View {
+// ===== v2.0 — Sync & Learn insights =====
+
+struct SyncInsightsSheet: View {
     @Environment(\.dismiss) var dismiss
-    let title: String
-    let branches: [String]
-    let onPick: (String) -> Void
-    @State private var choice = ""
+    @EnvironmentObject var store: Store
+    let report: Store.SyncReport?
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.title3.bold())
-            if branches.isEmpty {
-                Text("No branches found.").foregroundStyle(.secondary)
-            } else {
-                Picker("Branch", selection: $choice) {
-                    ForEach(branches, id: \.self) { Text($0) }
-                }.pickerStyle(.inline).frame(height: 180)
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Sync scan", icon: "arrow.triangle.2.circlepath", tint: .teal,
+                        subtitle: subtitleText) { dismiss() }
+            Divider().opacity(0.4)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let r = report {
+                        if !r.hasBaseline {
+                            VStack(spacing: 10) {
+                                GradientIcon(systemName: "graduationcap.fill", tint: .mint, size: 46)
+                                Text("No baseline yet").font(.headline)
+                                Text("Click \"Learn this build\" (or just commit) and BuildBuddy will snapshot every file. From then on it knows exactly what's new, what's missing, and what shrank.")
+                                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                                Button {
+                                    if let p = store.selected { store.learnBaseline(for: p) }
+                                    dismiss()
+                                } label: { Label("Learn this build now", systemImage: "graduationcap.fill") }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                        } else if r.isEmpty {
+                            VStack(spacing: 10) {
+                                GradientIcon(systemName: "checkmark.seal.fill", tint: .green, size: 46)
+                                Text("Fully in sync").font(.headline)
+                                Text("No new, missing, or shrunken files versus the last good build, and git reports nothing untracked.")
+                                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                        } else {
+                            section("New files since the last good build", "sparkles", .teal, r.newFiles,
+                                    "These files appeared after the baseline was learned. If they belong to the project, commit them so they're never lost.")
+                            section("New folders", "folder.badge.plus", .blue, r.newFolders,
+                                    "Entire folders that didn't exist in the last good build.")
+                            section("Untracked by git", "questionmark.folder.fill", .orange, r.untracked,
+                                    "Files git isn't tracking and isn't ignoring — the classic way work gets left behind.")
+                            section("Missing vs last good build", "exclamationmark.triangle.fill", .red, r.missing,
+                                    "These existed in the last good build but are gone now. If that's unexpected, this is a regression — restore before committing.")
+                            section("Drastically smaller", "arrow.down.right.circle.fill", .red, r.shrunk,
+                                    "Source files at less than half their last-good size — a common sign a delivery replaced a full file with a stub.")
+                        }
+                    } else {
+                        Text("Select a project and run Sync scan.").foregroundStyle(.secondary).padding()
+                    }
+                }
+                .padding(BB.pad)
             }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Go") { onPick(choice.isEmpty ? (branches.first ?? "") : choice); dismiss() }
-                    .keyboardShortcut(.defaultAction).disabled(branches.isEmpty)
+            if let r = report, !(r.untracked.isEmpty && r.newFiles.isEmpty) {
+                Divider().opacity(0.4)
+                HStack {
+                    Text("Committing updates the baseline automatically.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        Task { _ = await store.commitOnly(message: "Add new and untracked project files"); dismiss() }
+                    } label: { Label("Commit the new files", systemImage: "checkmark.circle") }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(12)
             }
         }
-        .padding(20).frame(width: 420)
-        .onAppear { choice = branches.first ?? "" }
+        .frame(width: 640, height: 560)
+    }
+
+    private var subtitleText: String {
+        guard let r = report, r.hasBaseline else { return "Compare the project to its last good build" }
+        let when = r.baselineDate.map { DateFormatter.bbStamp.string(from: $0) } ?? "unknown"
+        return "Baseline: good build #\(r.goodBuilds) · learned \(when)"
+    }
+
+    @ViewBuilder private func section(_ title: String, _ icon: String, _ tint: Color, _ items: [String], _ desc: String) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 7) {
+                    Image(systemName: icon).foregroundStyle(tint)
+                    Text(title).font(.headline)
+                    Text("\(items.count)").font(.caption.bold()).foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                }
+                Text(desc).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(items.prefix(30), id: \.self) { item in
+                        Text(item).font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    }
+                    if items.count > 30 {
+                        Text("…and \(items.count - 30) more").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+            }
+        }
     }
 }
 
-// MARK: - Options (Settings) — every toggle described to the user
+// ===== v2.0 — Clean Project =====
+
+struct CleanProjectSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var candidates: [String] = []
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Clean project", icon: "wand.and.stars", tint: .red,
+                        subtitle: store.selected.map { "Build artifacts inside \($0.name)" } ?? "") { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Removes build output only — .build, build, DerivedData, object files, logs, and .DS_Store. Source files and .git are never touched.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !loaded {
+                    HStack(spacing: 8) { ProgressView().scaleEffect(0.6); Text("Scanning…").font(.caption).foregroundStyle(.secondary) }
+                        .frame(maxWidth: .infinity, alignment: .center).padding(.vertical, 20)
+                } else if candidates.isEmpty {
+                    VStack(spacing: 8) {
+                        GradientIcon(systemName: "checkmark.seal.fill", tint: .green, size: 40)
+                        Text("Already clean — no build artifacts found.").font(.callout)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 20)
+                } else {
+                    Text("\(candidates.count) ITEM(S) TO REMOVE").font(.caption2.bold()).foregroundStyle(.secondary).tracking(0.8)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(candidates, id: \.self) {
+                                Text($0).font(.system(.caption2, design: .monospaced))
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    .frame(height: 180)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+                }
+
+                HStack {
+                    Button("Rescan") { rescan() }
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                    HeroButton(title: "Clean \(candidates.count) item\(candidates.count == 1 ? "" : "s")",
+                               icon: "wand.and.stars", tint: .red,
+                               disabled: candidates.isEmpty,
+                               reduceMotion: store.settings.reduceMotion) {
+                        guard let p = store.selected else { return }
+                        dismiss()
+                        Task { await store.cleanProject(for: p, dryRun: false) }
+                    }
+                }
+            }
+            .padding(BB.pad)
+        }
+        .frame(width: 540)
+        .onAppear { rescan() }
+    }
+
+    private func rescan() {
+        loaded = false
+        guard let p = store.selected else { candidates = []; loaded = true; return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = store.cleanProjectCandidates(for: p).map {
+                $0.path.replacingOccurrences(of: p.path + "/", with: "")
+            }
+            DispatchQueue.main.async { candidates = found; loaded = true }
+        }
+    }
+}
+
+// ===== Options =====
 
 struct OptionsView: View {
     @Environment(\.dismiss) var dismiss
@@ -2449,15 +4247,32 @@ struct OptionsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Options").font(.title2.bold())
-                Spacer()
-                Button("Reset to defaults") { store.settings.resetToDefaults() }
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-            .padding(16)
-            Divider()
+            SheetHeader(title: "Options", icon: "gearshape.fill", tint: .gray) { dismiss() }
+            Divider().opacity(0.4)
             Form {
+                Section("Appearance & motion") {
+                    Picker("Theme", selection: binding(\.themeChoice)) {
+                        Text("Match system").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                    Picker("Accent color", selection: binding(\.accentChoice)) {
+                        Text("Blue").tag("blue"); Text("Purple").tag("purple"); Text("Pink").tag("pink")
+                        Text("Green").tag("green"); Text("Orange").tag("orange"); Text("Red").tag("red")
+                        Text("Teal").tag("teal"); Text("Indigo").tag("indigo")
+                    }
+                    Toggle("Reduce motion (calmer, faster transitions)", isOn: binding(\.reduceMotion))
+                }
+
+                Section("Sync & Learn") {
+                    Toggle("Scan for new files when a project is selected", isOn: binding(\.syncScanOnSelect))
+                    Toggle("Regression guard — warn before commit if files went missing or shrank", isOn: binding(\.regressionGuard))
+                    Toggle("Learn the baseline automatically after every commit", isOn: binding(\.autoLearnOnCommit))
+                    Toggle("Auto-clear caches after commit (status cache, temp extractions, prune old backups)", isOn: binding(\.autoClearCachesOnCommit))
+                    Text("BuildBuddy snapshots every good build. New files are surfaced so they're never forgotten, and vanished or drastically-shrunken files are flagged before a commit can seal in a regression.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
                 Section("Auto commit & push") {
                     Toggle("Auto commit and push after applying a delivery", isOn: binding(\.autoCommitAndPush))
                     Toggle("Push after commit (off = commit only)", isOn: binding(\.pushAfterCommit))
@@ -2518,31 +4333,32 @@ struct OptionsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
 
-                Section("Scheduled auto-pull") {
-                    Toggle("Periodically pull on a timer", isOn: Binding(
-                        get: { store.settings.scheduledAutoPull },
-                        set: { store.settings.scheduledAutoPull = $0; store.configureAutoPull() }))
-                    HStack {
-                        Text("Every")
-                        Stepper("\(Int(store.settings.autoPullMinutes)) min",
-                                value: Binding(get: { store.settings.autoPullMinutes },
-                                               set: { store.settings.autoPullMinutes = $0; store.configureAutoPull() }),
-                                in: 1...240, step: 1)
-                    }.disabled(!store.settings.scheduledAutoPull)
-                    Toggle("Pull every project (not just the selected one)", isOn: binding(\.autoPullAllProjects))
-                        .disabled(!store.settings.scheduledAutoPull)
-                    Text("Auto-pull is skipped while another action is running, and only fast-forwards.")
+                Section("Pushing") {
+                    Toggle("Pause ALL auto-push (commit locally, never touch the remote)", isOn: binding(\.pauseAllAutoPush))
+                    Toggle("Force-push over a diverged remote (fetch, then force-with-lease, then force)", isOn: binding(\.forcePushOnReject))
+                    Text("If your push is rejected as non-fast-forward, BuildBuddy can recover automatically by overwriting the remote with your local history. Safe only when you're the sole contributor and the remote is disposable — your LOCAL commits are never altered. If you'd rather be the only thing that pushes, turn on Pause all auto-push and push from Terminal yourself.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
 
-                Section("Appearance") {
-                    Picker("Accent color", selection: binding(\.accentChoice)) {
-                        Text("Blue").tag("blue"); Text("Purple").tag("purple"); Text("Pink").tag("pink")
-                        Text("Green").tag("green"); Text("Orange").tag("orange"); Text("Red").tag("red")
-                        Text("Teal").tag("teal"); Text("Indigo").tag("indigo")
+                Section("Folder monitoring") {
+                    Text("Folders to watch for delivery zips (one path per line). Downloads is always watched.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: binding(\.extraWatchFolders)).frame(height: 56)
+                        .font(.system(.caption, design: .monospaced))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.secondary.opacity(0.3)))
+                    Divider()
+                    Text("Folders to scan when cleaning lingering BuildBuddy build files (one per line). Blank = the app's own parent folder.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: binding(\.buildCleanupFolders)).frame(height: 56)
+                        .font(.system(.caption, design: .monospaced))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.secondary.opacity(0.3)))
+                    Toggle("Clean lingering build files on launch", isOn: binding(\.cleanBuildOnLaunch))
+                    HStack {
+                        Button("Preview cleanup (dry run)") { Task { await store.cleanLingeringBuildFiles(dryRun: true) } }
+                        Button("Clean now") { Task { await store.cleanLingeringBuildFiles() } }
                     }
-                    Toggle("Group action buttons into sections (Git / Delivery / Tools)", isOn: binding(\.groupActionGrid))
-                    Toggle("Collapse the console", isOn: binding(\.consoleCollapsed))
+                    Text("Removes .build, build.log, stale *.app copies, *.o / *.swiftmodule and similar. Never deletes BuildBuddy.swift, the launcher, the running app, or .git.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
 
                 Section("Console & feedback") {
@@ -2552,19 +4368,24 @@ struct OptionsView: View {
                     Toggle("Dry-run mode (print actions, never write/commit/push)", isOn: binding(\.dryRunMode))
                         .help("Great for testing — shows exactly what BuildBuddy would do without touching anything.")
                 }
+
+                Section {
+                    Button("Reset all options to defaults") { store.settings.resetToDefaults(); store.objectWillChange.send() }
+                }
             }
             .formStyle(.grouped)
         }
     }
 
-    // Small helper to bridge SettingsStore @AppStorage to Toggle/TextField bindings.
+    // Bridge SettingsStore @AppStorage to bindings; nudges the Store so accent/theme
+    // changes repaint the whole window immediately.
     private func binding<T>(_ keyPath: ReferenceWritableKeyPath<SettingsStore, T>) -> Binding<T> {
         Binding(get: { store.settings[keyPath: keyPath] },
-                set: { store.settings[keyPath: keyPath] = $0 })
+                set: { store.settings[keyPath: keyPath] = $0; store.objectWillChange.send() })
     }
 }
 
-// MARK: - What's New / Changelog
+// ===== What's New =====
 
 struct WhatsNewView: View {
     @Environment(\.dismiss) var dismiss
@@ -2572,9 +4393,10 @@ struct WhatsNewView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("What's New in BuildBuddy").font(.title2.bold())
+            HStack(spacing: 12) {
+                GradientIcon(systemName: "sparkles", tint: store.settings.accentColor, size: 34)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("What's New in BuildBuddy").font(.title3.bold())
                     Text("You're running v\(BuildBuddyVersion)").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -2595,7 +4417,7 @@ struct WhatsNewView: View {
                 }
                 .padding(.horizontal, 16).padding(.bottom, 8)
             }
-            Divider()
+            Divider().opacity(0.4)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     ForEach(BuildBuddyChangelog) { entry in
@@ -2622,35 +4444,755 @@ struct WhatsNewView: View {
                 .padding(20)
             }
         }
-        .frame(width: 640, height: 560)
+        .frame(width: 660, height: 580)
     }
 }
 
-// MARK: - Instructions (improvement #2 — playbook shipped inside the app)
+// ===== Instructions =====
 
 struct InstructionsView: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var doc = 0
+
+    private var currentText: String {
+        switch doc {
+        case 1:  return BuildStandard.text
+        case 2:  return DeployInstructions.text
+        default: return DeliveryInstructions.text
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("BuildBuddy Delivery Instructions").font(.title2.bold())
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            SheetHeader(title: "Instructions", icon: "book.fill", tint: .orange,
+                        subtitle: "Delivery format · Build & Version standard · Deploy website") { dismiss() }
+
+            Picker("", selection: $doc) {
+                Text("Delivery format").tag(0)
+                Text("Build & Version standard").tag(1)
+                Text("Deploy website").tag(2)
             }
-            .padding(16)
-            Divider()
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16)
+
+            HStack(spacing: 8) {
+                Text("Export all documents:").font(.caption).foregroundStyle(.secondary)
+                Button { store.copyInstructions() } label: { Label("Copy", systemImage: "doc.on.doc") }
+                    .controlSize(.small)
+                Button { store.exportInstructions(markdown: true) } label: { Label("Save .md", systemImage: "arrow.down.doc") }
+                    .controlSize(.small)
+                Button { store.exportInstructions(markdown: false) } label: { Label("Save .txt", systemImage: "arrow.down.doc") }
+                    .controlSize(.small)
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+
+            Divider().opacity(0.4)
             ScrollView {
-                Text(DeliveryInstructions.text)
+                Text(currentText)
                     .font(.system(.body, design: .default))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(20)
             }
         }
-        .frame(width: 720, height: 620)
+        .frame(width: 760, height: 660)
     }
 }
 
+// ===== Doctor =====
+
+struct DoctorView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var rows: [ToolRow] = []
+    @State private var working = false
+    @State private var ghAuth: String = "checking…"
+
+    struct ToolRow: Identifiable { let id = UUID(); let name: String; let probe: String; var found: String? }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Doctor", icon: "stethoscope", tint: .pink,
+                        subtitle: "Dependency checks · BuildBuddy v\(BuildBuddyVersion)") { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Checks the tools BuildBuddy uses. Install the missing ones with one click (uses Homebrew / npm).")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach($rows) { $row in
+                    HStack {
+                        Image(systemName: row.found != nil ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(row.found != nil ? .green : .red)
+                        Text(row.name).frame(width: 90, alignment: .leading)
+                        Text(row.found ?? "not found").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+
+                Divider().opacity(0.4)
+                HStack(alignment: .top) {
+                    Image(systemName: ghAuth.contains("Logged in") ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                        .foregroundStyle(ghAuth.contains("Logged in") ? .green : .orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("GitHub auth").fontWeight(.medium)
+                        Text(ghAuth).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    }
+                    Spacer()
+                    Button("gh auth login") { Task { await store.run("gh auth login --web -h github.com || gh auth login", cwd: nil, label: "gh auth login"); checkGhAuth() } }
+                }
+
+                HStack {
+                    Button("Re-check") { check(); checkGhAuth() }
+                    Button("Install missing") { Task { await installMissing() } }.disabled(working)
+                    if working { ProgressView().scaleEffect(0.6) }
+                    Spacer()
+                }
+            }
+            .padding(BB.pad)
+        }
+        .frame(width: 560)
+        .onAppear { check(); checkGhAuth() }
+    }
+
+    private func check() {
+        rows = [
+            .init(name: "git",      probe: "git --version"),
+            .init(name: "swift",    probe: "xcrun --find swiftc"),
+            .init(name: "gh",       probe: "gh --version"),
+            .init(name: "node",     probe: "node --version"),
+            .init(name: "wrangler", probe: "npx --yes wrangler --version"),
+            .init(name: "brew",     probe: "brew --version"),
+        ]
+        for i in rows.indices {
+            let r = store.syncShell(rows[i].probe, cwd: nil)
+            rows[i].found = r.code == 0 ? r.out.split(separator: "\n").first.map(String.init) : nil
+        }
+    }
+
+    private func checkGhAuth() {
+        let r = store.syncShell("gh auth status 2>&1 | head -n 3", cwd: nil)
+        let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.isEmpty {
+            ghAuth = "gh not installed — install it below, then sign in."
+        } else if out.localizedCaseInsensitiveContains("Logged in") {
+            ghAuth = "Logged in. " + (out.split(separator: "\n").first.map(String.init) ?? "")
+        } else {
+            ghAuth = "Not logged in. Click 'gh auth login' to sign in via browser."
+        }
+    }
+
+    private func installMissing() async {
+        working = true; defer { working = false }
+        if rows.first(where: { $0.name == "brew" })?.found == nil {
+            store.line("Homebrew isn't installed. Opening the official installer in Terminal — follow its prompts, then re-check.")
+            _ = await store.run("open -a Terminal", cwd: nil, label: "Open Terminal")
+            _ = await store.run("echo 'Run this in Terminal:  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"'", cwd: nil)
+            return
+        }
+        if rows.first(where: { $0.name == "gh" })?.found == nil {
+            _ = await store.run("brew install gh", cwd: nil, label: "Install gh")
+        }
+        if rows.first(where: { $0.name == "node" })?.found == nil {
+            _ = await store.run("brew install node", cwd: nil, label: "Install node")
+        }
+        check(); checkGhAuth()
+    }
+}
+
+// ===== Feature views =====
+
+struct DiffView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var diff = "Loading…"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Pending changes", icon: "doc.text.magnifyingglass", tint: .purple,
+                        subtitle: store.selected?.name ?? "") { dismiss() }
+            HStack {
+                Spacer()
+                Button { Task { diff = await store.pendingDiff() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 16).padding(.bottom, 8)
+            Divider().opacity(0.4)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, raw in
+                        let s = String(raw)
+                        Text(s.isEmpty ? " " : s)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(diffColor(s))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .background(diffBackground(s))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+        }
+        .frame(width: 780, height: 620)
+        .task { diff = await store.pendingDiff() }
+    }
+
+    private func diffColor(_ s: String) -> Color {
+        if s.hasPrefix("+") && !s.hasPrefix("+++") { return .green }
+        if s.hasPrefix("-") && !s.hasPrefix("---") { return .red }
+        if s.hasPrefix("@@") { return .cyan }
+        if s.hasPrefix("diff ") || s.hasPrefix("+++") || s.hasPrefix("---") || s.hasPrefix("index ") { return .secondary }
+        return .primary
+    }
+    private func diffBackground(_ s: String) -> Color {
+        if s.hasPrefix("+") && !s.hasPrefix("+++") { return Color.green.opacity(0.08) }
+        if s.hasPrefix("-") && !s.hasPrefix("---") { return Color.red.opacity(0.08) }
+        return Color.clear
+    }
+}
+
+struct HistoryView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var rows: [Store.CommitRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Recent commits", icon: "clock.arrow.circlepath", tint: .brown,
+                        subtitle: store.selected?.name ?? "") { dismiss() }
+            Divider().opacity(0.4)
+            if rows.isEmpty {
+                Text("No commits found.").foregroundStyle(.secondary).padding()
+                Spacer()
+            } else {
+                List(rows) { c in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(c.sha).font(.system(.caption, design: .monospaced)).foregroundStyle(.tint)
+                            .frame(width: 70, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(c.subject).font(.callout)
+                            Text("\(c.author) · \(c.date)").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(c.sha, forType: .string)
+                        } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                        .help("Copy SHA")
+                    }.padding(.vertical, 2)
+                }
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .frame(width: 720, height: 560)
+        .task { rows = await store.recentCommits() }
+    }
+}
+
+struct CommitAllView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var msg = ""
+    private var problems: [String] { CommitSafety.problems(in: msg) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Commit all dirty repositories", icon: "square.stack.3d.up.fill", tint: .orange,
+                        subtitle: "Same message, every dirty project — scoped per repo, then pushed") { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 12) {
+                TextEditor(text: $msg).frame(height: 90)
+                    .font(.system(.body, design: .monospaced))
+                    .padding(4)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous)
+                        .strokeBorder(problems.isEmpty ? Color.white.opacity(0.12) : Color.red.opacity(0.8), lineWidth: 1))
+                if !problems.isEmpty {
+                    ForEach(problems, id: \.self) { Text("• \($0)").font(.caption2).foregroundStyle(.red) }
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                    HeroButton(title: "Commit all", icon: "checkmark.circle.fill", tint: .orange,
+                               disabled: msg.trimmingCharacters(in: .whitespaces).isEmpty || !problems.isEmpty,
+                               reduceMotion: store.settings.reduceMotion) {
+                        let m = msg; dismiss(); Task { await store.commitAllDirty(message: m) }
+                    }
+                }
+            }
+            .padding(BB.pad)
+        }
+        .frame(width: 500)
+    }
+}
+
+struct ApplyHistoryView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                GradientIcon(systemName: "clock.badge.checkmark.fill", tint: .brown, size: 34)
+                Text("Apply history").font(.title3.bold())
+                Spacer()
+                Button("Clear") { store.clearHistory() }.disabled(store.history.isEmpty)
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }.padding(16)
+            Divider().opacity(0.4)
+            if store.history.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock.badge.questionmark").font(.system(size: 40)).foregroundStyle(.secondary)
+                    Text("No deliveries applied yet.").foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(store.history.reversed()) { rec in
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 8) {
+                                        Text(rec.projectName).fontWeight(.semibold)
+                                        if let sha = rec.commitSHA {
+                                            Text(sha.prefix(8)).font(.caption.monospaced()).foregroundStyle(.tint)
+                                        }
+                                        Text(rec.date, style: .date).font(.caption2).foregroundStyle(.secondary)
+                                        Text(rec.date, style: .time).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    Text("\(rec.fileCount) file\(rec.fileCount == 1 ? "" : "s")\(rec.zipName.map { " · \($0)" } ?? "")")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                    Text(rec.commitMessage.split(separator: "\n").first.map(String.init) ?? "")
+                                        .font(.caption).lineLimit(1)
+                                }
+                                Spacer()
+                                if rec.backupDir != nil {
+                                    Button("Undo") { Task { await store.undoApply(rec) } }
+                                        .buttonStyle(.bordered).controlSize(.small)
+                                        .help("Restore the files this delivery overwrote, from the backup taken at apply time")
+                                } else {
+                                    Text("no backup").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 9)
+                            Divider().opacity(0.3)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 720, height: 560)
+    }
+}
+
+struct ConsoleResizeHandle: View {
+    @Binding var height: Double
+    @State private var startHeight: Double? = nil
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color.secondary.opacity(0.001)).frame(height: 10)
+            Capsule().fill(Color.secondary.opacity(0.35))
+                .frame(width: 40, height: 4)
+        }
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    if startHeight == nil { startHeight = height }
+                    height = (startHeight ?? height) - value.translation.height
+                }
+                .onEnded { _ in startHeight = nil }
+        )
+    }
+}
+
+struct ConnectGitHubSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+
+    enum Path: String, CaseIterable { case cli = "GitHub CLI", browser = "Browser + commands" }
+    @State private var path: Path = .cli
+    @State private var repoName = ""
+    @State private var visibility = "private"
+    @State private var ghInstalled = false
+    @State private var ghAuthed = false
+    @State private var checking = true
+    @State private var remoteURLField = ""
+
+    private var suggestedName: String { store.selected?.name ?? "my-app" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Connect to GitHub", icon: "link.badge.plus", tint: .green) { dismiss() }
+            Divider().opacity(0.4)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    intro
+                    Picker("Method", selection: $path) {
+                        ForEach(Path.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.top, 4)
+
+                    if path == .cli { cliPath } else { browserPath }
+                }
+                .padding(20)
+            }
+        }
+        .frame(width: 660, height: 620)
+        .task {
+            repoName = suggestedName
+            ghInstalled = await store.hasGHCLI()
+            if ghInstalled { ghAuthed = await store.ghAuthenticated() }
+            checking = false
+            path = ghInstalled ? .cli : .browser
+        }
+    }
+
+    private var intro: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("This repo has no GitHub remote yet.").font(.headline)
+            Text("Your local work — commits, branches, history, diff — already works without GitHub. Connect a remote when you want to back it up or push. Pick whichever method you prefer; you can copy any command.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if checking {
+                HStack(spacing: 6) { ProgressView().scaleEffect(0.6); Text("Checking your setup…").font(.caption).foregroundStyle(.secondary) }
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: ghInstalled ? "checkmark.circle.fill" : "info.circle")
+                        .foregroundStyle(ghInstalled ? Color.green : Color.orange)
+                    Text(ghInstalled
+                         ? (ghAuthed ? "GitHub CLI is installed and signed in." : "GitHub CLI is installed but not signed in yet.")
+                         : "GitHub CLI (gh) isn't installed — the browser method is ready to use.")
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private var nameControls: some View {
+        HStack(spacing: 10) {
+            TextField("repository name", text: $repoName).textFieldStyle(.roundedBorder).frame(maxWidth: 240)
+            Picker("", selection: $visibility) { Text("Private").tag("private"); Text("Public").tag("public") }
+                .labelsHidden().frame(width: 120)
+        }
+    }
+
+    private var cliPath: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if !ghInstalled {
+                stepCard(1, "Install the GitHub CLI", "The gh tool creates the repo and pushes in one step.") {
+                    CopyCommand("brew install gh")
+                    Text("After installing, reopen this window.").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            if ghInstalled && !ghAuthed {
+                stepCard(1, "Sign in to GitHub", "Authenticate gh with your account (opens a browser to confirm).") {
+                    CopyCommand("gh auth login")
+                    Button {
+                        Task { _ = await store.run("gh auth login --web 2>&1", cwd: store.selected?.url, label: "gh auth login"); ghAuthed = await store.ghAuthenticated() }
+                    } label: { Label("Run for me", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                }
+            }
+            stepCard(ghInstalled ? (ghAuthed ? 1 : 2) : 2, "Name it and create", "BuildBuddy runs gh to create the repo, add it as origin, and push — all at once.") {
+                nameControls
+                CopyCommand("gh repo create \(repoNameOrPlaceholder) --\(visibility) --source=. --remote=origin --push")
+                Button {
+                    Task { await store.createGitHubRepoWithGH(name: repoName.isEmpty ? suggestedName : repoName, visibility: visibility); if store.hasRemote { dismiss() } }
+                } label: { Label("Create & push for me", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(!ghInstalled || !ghAuthed)
+                if !ghInstalled || !ghAuthed {
+                    Text("Finish the step(s) above to enable this.").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var browserPath: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            stepCard(1, "Create the repo on GitHub.com", "Open the new-repo page, give it a name, and DON'T add a README or .gitignore (your local files will be the first push).") {
+                Button {
+                    if let url = URL(string: "https://github.com/new") { NSWorkspace.shared.open(url) }
+                } label: { Label("Open github.com/new", systemImage: "safari") }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+            }
+            stepCard(2, "Copy the repo URL", "On the new repo's page, copy the HTTPS URL — it looks like https://github.com/you/your-app.git — and paste it here.") {
+                TextField("https://github.com/you/your-app.git", text: $remoteURLField)
+                    .textFieldStyle(.roundedBorder)
+            }
+            stepCard(3, "Connect and push", "BuildBuddy adds the remote, sets the branch upstream, and pushes. Or copy the commands to run yourself.") {
+                CopyCommand("git remote add origin \(remoteURLField.isEmpty ? "REPO_URL" : remoteURLField)\ngit branch -M main\ngit push -u origin main")
+                Button {
+                    Task { await store.connectExistingRemote(url: remoteURLField); if store.hasRemote { dismiss() } }
+                } label: { Label("Connect & push for me", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(remoteURLField.isEmpty)
+            }
+        }
+    }
+
+    private var repoNameOrPlaceholder: String { repoName.isEmpty ? "your-app" : repoName }
+
+    @ViewBuilder private func stepCard<Content: View>(_ n: Int, _ title: String, _ subtitle: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(BB.accentGradient(.accentColor)).frame(width: 28, height: 28)
+                Text("\(n)").font(.callout.bold()).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                content()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+}
+
+struct CopyCommand: View {
+    let command: String
+    init(_ command: String) { self.command = command }
+    @State private var copied = false
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(command)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(copied ? .green : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Copy")
+        }
+    }
+}
+
+struct StaleReportSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    let report: Store.StaleReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Stale & Missing File Check", icon: "exclamationmark.magnifyingglass", tint: .yellow) { dismiss() }
+            Divider().opacity(0.4)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if report.isEmpty {
+                        VStack(spacing: 10) {
+                            GradientIcon(systemName: "checkmark.seal.fill", tint: .green, size: 46)
+                            Text("Everything looks current.").font(.headline)
+                            Text("No stale builds, no conflicting duplicate filenames, and nothing untracked that git isn't already ignoring.")
+                                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 30)
+                    } else {
+                        section("Stale builds", "hammer.fill", .orange,
+                                report.staleBuilds,
+                                "Compiled artifacts older than your newest source file — the build predates your latest edits. Rebuild, or use Clean project.")
+                        section("Duplicate names, different contents", "doc.on.doc.fill", .red,
+                                report.duplicateNames,
+                                "The same filename appears in more than one place with different contents — a common source of editing the wrong copy.")
+                        section("Untracked / possibly missed", "questionmark.folder.fill", .blue,
+                                report.missedFiles,
+                                "Files git isn't tracking and isn't ignoring. If they belong in the repo, commit them; if not, add them to .gitignore.")
+                    }
+                }
+                .padding(20)
+            }
+            if !report.missedFiles.isEmpty {
+                Divider().opacity(0.4)
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { _ = await store.commitOnly(message: "Add previously untracked files"); dismiss() }
+                    } label: { Label("Commit the untracked files", systemImage: "checkmark.circle") }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(12)
+            }
+        }
+        .frame(width: 640, height: 560)
+    }
+
+    @ViewBuilder private func section(_ title: String, _ icon: String, _ tint: Color, _ items: [String], _ desc: String) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 7) {
+                    Image(systemName: icon).foregroundStyle(tint)
+                    Text(title).font(.headline)
+                    Text("\(items.count)").font(.caption.bold()).foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                }
+                Text(desc).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(items.prefix(25), id: \.self) { item in
+                        Text(item).font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                    }
+                    if items.count > 25 {
+                        Text("…and \(items.count - 25) more").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: BB.radiusSmall, style: .continuous))
+            }
+        }
+    }
+}
+
+// Toast overlay — glass capsules that spring in from the bottom.
+struct ToastOverlay: View {
+    @EnvironmentObject var store: Store
+    var body: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            ForEach(store.toasts) { t in
+                HStack(spacing: 8) {
+                    Image(systemName: icon(t.kind)).foregroundStyle(color(t.kind))
+                    Text(t.text).font(.callout)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(color(t.kind).opacity(0.4), lineWidth: 1))
+                .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(.bottom, 18)
+        .animation(store.settings.reduceMotion ? .easeOut(duration: 0.12)
+                   : .spring(response: 0.35, dampingFraction: 0.8), value: store.toasts.count)
+        .allowsHitTesting(false)
+    }
+    private func icon(_ k: Store.Toast.Kind) -> String {
+        switch k { case .success: return "checkmark.circle.fill"; case .error: return "exclamationmark.triangle.fill"; case .info: return "info.circle.fill" }
+    }
+    private func color(_ k: Store.Toast.Kind) -> Color {
+        switch k { case .success: return .green; case .error: return .red; case .info: return .blue }
+    }
+}
+
+// Clean folder — wipe a designated folder, or delete only files matching patterns.
+struct CleanFolderView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var store: Store
+    @State private var folderPath = ""
+    @State private var patterns = ""
+    @State private var confirmText = ""
+    @State private var preview: [String] = []
+    @State private var didPreview = false
+
+    private var folderURL: URL? {
+        folderPath.isEmpty ? nil : URL(fileURLWithPath: (folderPath as NSString).expandingTildeInPath)
+    }
+    private var isFullWipe: Bool { patterns.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var confirmed: Bool { confirmText == "DELETE" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(title: "Clean a folder", icon: "folder.badge.minus", tint: .red,
+                        subtitle: "Preview first — this cannot be undone") { dismiss() }
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Delete files from a folder. Leave patterns empty to remove EVERYTHING in the folder, or list patterns to delete only matching files.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                HStack {
+                    TextField("Folder path (e.g. ~/Documents/MyProject/build)", text: $folderPath)
+                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                    Button("Choose…") { chooseFolder() }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Patterns (comma/space separated). Examples: *.log  .DS_Store  build  node_modules")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("leave empty to wipe the whole folder", text: $patterns)
+                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                    if let p = store.selected {
+                        Button("Use \(p.name) build patterns") {
+                            patterns = "*.o, *.swiftmodule, *.swiftdoc, .build, build, DerivedData, .DS_Store, dist, node_modules"
+                        }.font(.caption2)
+                    }
+                }
+
+                if isFullWipe {
+                    Label("Full wipe: every item in the folder will be deleted.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.red)
+                }
+
+                HStack {
+                    Button("Preview (dry run)") {
+                        guard let f = folderURL else { return }
+                        preview = store.cleanCandidates(folder: f, patterns: patterns).map { $0.lastPathComponent }.sorted()
+                        didPreview = true
+                    }
+                    .disabled(folderURL == nil)
+                    Spacer()
+                    Text(didPreview ? "\(preview.count) item(s) would be removed" : " ")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                if didPreview {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 1) {
+                            if preview.isEmpty { Text("Nothing matches.").foregroundStyle(.secondary).font(.caption) }
+                            ForEach(preview, id: \.self) { Text($0).font(.system(.caption2, design: .monospaced)) }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                    }
+                    .frame(height: 120)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                Divider().opacity(0.4)
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Type DELETE to confirm").font(.caption2).foregroundStyle(.secondary)
+                        TextField("DELETE", text: $confirmText).textFieldStyle(.roundedBorder).frame(width: 160)
+                    }
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                    Button("Clean now", role: .destructive) {
+                        guard let f = folderURL else { return }
+                        let pats = patterns; dismiss()
+                        Task { await store.cleanFolder(f, patterns: pats, dryRun: false) }
+                    }
+                    .disabled(folderURL == nil || !confirmed)
+                }
+            }
+            .padding(BB.pad)
+        }
+        .frame(width: 580)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder to clean"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { folderPath = url.path }
+    }
+}
 // The full playbook text, embedded so it travels with the app — no loose PDF required.
 enum DeliveryInstructions {
     static let text: String = """
@@ -2760,927 +5302,316 @@ APPENDIX C — QUICK CHECKLIST
 """
 }
 
-// MARK: - Doctor
+// The build/version standardization playbook — shared across ALL apps so every project numbers
+// releases the same way. Embedded so it travels with the app and can be exported.
+enum BuildStandard {
+    static let text: String = """
+BUILD AND VERSION STANDARD
+A single, shared scheme for numbering every app the same way. Apply this to all projects.
 
-struct DoctorView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    @State private var rows: [ToolRow] = []
-    @State private var working = false
-    @State private var ghAuth: String = "checking…"   // improvement #8
+THE TWO NUMBERS
+Every app's Info.plist carries two values. They map directly:
 
-    struct ToolRow: Identifiable { let id = UUID(); let name: String; let probe: String; var found: String? }
+  CFBundleShortVersionString  =  VERSION  (small changes, fixes, minor tweaks)
+  CFBundleVersion             =  BUILD    (big features, significant changes)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Doctor — dependencies").font(.title2.bold())
-                Spacer()
-                Text("BuildBuddy v\(BuildBuddyVersion)").font(.caption).foregroundStyle(.secondary)
-            }
-            Text("Checks the tools BuildBuddy uses. Install the missing ones with one click (uses Homebrew / npm).")
-                .font(.caption).foregroundStyle(.secondary)
-            ForEach($rows) { $row in
-                HStack {
-                    Image(systemName: row.found != nil ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(row.found != nil ? .green : .red)
-                    Text(row.name).frame(width: 90, alignment: .leading)
-                    Text(row.found ?? "not found").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                }
-            }
+VERSION is shown to people (e.g. 1.4). BUILD is a single whole number that only goes up (e.g. 7).
 
-            Divider()
-            // Improvement #8 — GitHub auth status + one-click login.
-            HStack(alignment: .top) {
-                Image(systemName: ghAuth.contains("Logged in") ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                    .foregroundStyle(ghAuth.contains("Logged in") ? .green : .orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("GitHub auth").fontWeight(.medium)
-                    Text(ghAuth).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                }
-                Spacer()
-                Button("gh auth login") { Task { await store.run("gh auth login --web -h github.com || gh auth login", cwd: nil, label: "gh auth login"); checkGhAuth() } }
-            }
+WHEN TO BUMP WHICH
+- Bump the BUILD number for a big feature addition or a significant change. BUILD goes 7 to 8.
+- Bump the VERSION for a small feature, a fix, or a minor change. VERSION 1.4 goes to 1.5.
 
-            HStack {
-                Button("Re-check") { check(); checkGhAuth() }
-                Button("Install missing") { Task { await installMissing() } }.disabled(working)
-                if working { ProgressView().scaleEffect(0.6) }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20).frame(width: 540)
-        .onAppear { check(); checkGhAuth() }
-    }
+Rule of thumb: if you would tell someone "this is a notable new capability," bump BUILD. If it is a
+small improvement or a bug fix, bump VERSION.
 
-    private func check() {
-        rows = [
-            .init(name: "git",      probe: "git --version"),
-            .init(name: "swift",    probe: "xcrun --find swiftc"),
-            .init(name: "gh",       probe: "gh --version"),
-            .init(name: "node",     probe: "node --version"),
-            .init(name: "wrangler", probe: "npx --yes wrangler --version"),
-            .init(name: "brew",     probe: "brew --version"),
-        ]
-        for i in rows.indices {
-            let r = store.syncShell(rows[i].probe, cwd: nil)
-            rows[i].found = r.code == 0 ? r.out.split(separator: "\n").first.map(String.init) : nil
-        }
-    }
+HOW VERSION INCREMENTS
+VERSION is dotted. Bumping increases the LAST component:
+  1.4   becomes  1.5
+  1.4.2 becomes  1.4.3
+  1     becomes  1.1
+You may carry a major component (the leading number) and raise it by hand for a true milestone, but
+day to day you only ever bump the last component for small changes.
 
-    private func checkGhAuth() {
-        let r = store.syncShell("gh auth status 2>&1 | head -n 3", cwd: nil)
-        let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
-        if out.isEmpty {
-            ghAuth = "gh not installed — install it below, then sign in."
-        } else if out.localizedCaseInsensitiveContains("Logged in") {
-            ghAuth = "Logged in. " + (out.split(separator: "\n").first.map(String.init) ?? "")
-        } else {
-            ghAuth = "Not logged in. Click 'gh auth login' to sign in via browser."
-        }
-    }
+HOW BUILD INCREMENTS
+BUILD is one whole number, incremented by one for each big change:
+  1, 2, 3, 4, ...
 
-    private func installMissing() async {
-        working = true; defer { working = false }
-        if rows.first(where: { $0.name == "brew" })?.found == nil {
-            store.line("Homebrew isn't installed. Opening the official installer in Terminal — follow its prompts, then re-check.")
-            _ = await store.run("open -a Terminal", cwd: nil, label: "Open Terminal")
-            _ = await store.run("echo 'Run this in Terminal:  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"'", cwd: nil)
-            return
-        }
-        if rows.first(where: { $0.name == "gh" })?.found == nil {
-            _ = await store.run("brew install gh", cwd: nil, label: "Install gh")
-        }
-        if rows.first(where: { $0.name == "node" })?.found == nil {
-            _ = await store.run("brew install node", cwd: nil, label: "Install node")
-        }
-        check(); checkGhAuth()
-    }
+THE BASELINE (EVERY APP STARTS HERE)
+When standardizing an app for the first time, reset it to:
+  VERSION = 1.0
+  BUILD   = 1
+Then move forward using the rules above. Do this even if the app previously had other numbers, so
+all apps share one clean starting point.
+
+WHERE THE NUMBERS LIVE (TWO POSSIBLE PLACES)
+Apps differ in how Xcode is configured, so the numbers live in one or both of these:
+  - The Xcode project (project.pbxproj): MARKETING_VERSION (= VERSION) and
+    CURRENT_PROJECT_VERSION (= BUILD). Used when the app sets versions via Build Settings.
+  - The Info.plist: CFBundleShortVersionString (= VERSION) and CFBundleVersion (= BUILD). Used
+    when the app keeps a manual Info.plist.
+BuildBuddy detects which exist and updates BOTH when both are present, keeping every target and the
+in-app display in lockstep. If they ever disagree, the Xcode project is treated as the source of
+truth and mirrored to the plist.
+
+DOING IT IN BUILDBUDDY (BUTTONS)
+With a project selected, the Version and Build section has:
+  - Standardize this app  (one click: detects the setup; if not standardized, sets VERSION 1.0 /
+                           BUILD 1 everywhere the numbers live; if ALREADY standardized, it does
+                           NOT reset your numbers — it only adds the timestamped What's New entry.)
+  - Bump version          (small change: raises the last component of VERSION, everywhere)
+  - Bump build            (big change: BUILD + 1, everywhere)
+  - Reset to 1.0 / build 1 (force the baseline; use when migrating an app)
+Every one of these also writes a timestamped What's New entry automatically (see below), then you
+commit the change like any other edit.
+
+TIMESTAMPED WHAT'S NEW / WHAT'S CHANGED (AUTOMATIC)
+Every version or build change records an entry stamped MM:DD:YY HH:MM (local time). BuildBuddy finds
+the app's existing changelog and prepends to it:
+  - If the repo root has CHANGELOG.md, WHATS_NEW.md, WHATSNEW.md, or CHANGES.md, it prepends there.
+  - If the app keeps its What's New in a Swift file, BuildBuddy records the timestamped entry in
+    CHANGELOG.md (so history is preserved) and notes it, since editing arbitrary Swift changelog
+    structures blind is unsafe — copy the line into the in-app list if you want it shown there.
+  - If nothing exists, BuildBuddy creates CHANGELOG.md.
+Entry format:
+    MM:DD:YY HH:MM — v<version> (build <build>) — <kind>
+    <short note>
+
+DOING IT BY SCRIPT (NO BUILDBUDDY)
+Pick the lines that match where your app keeps its numbers.
+
+  Info.plist apps (replace PLIST with the path to Info.plist):
+    Read:   /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" PLIST
+    Build:  current=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" PLIST)
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $((current + 1))" PLIST
+    Version (two-part like 1.4):
+            v=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" PLIST)
+            major=${v%.*}; minor=${v##*.}; /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $major.$((minor + 1))" PLIST
+
+  Xcode-project apps (replace PBX with the path to project.pbxproj):
+    Build:  current=$(grep -Eo 'CURRENT_PROJECT_VERSION = [0-9]+;' PBX | grep -Eo '[0-9]+' | sort -n | tail -1)
+            sed -i '' -E "s/CURRENT_PROJECT_VERSION = [0-9]+;/CURRENT_PROJECT_VERSION = $((current + 1));/g" PBX
+    Version: sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = 1.1;/g" PBX   (set as needed)
+
+  Timestamped changelog line (append to your changelog of choice):
+    stamp=$(date +"%m:%d:%y %H:%M"); printf '%s — v1.0 (build 1) — Note\\n' "$stamp"
+
+MIGRATING AN EXISTING APP TO THIS STANDARD (WIPE OLD NUMBERS)
+Easiest: select the app in BuildBuddy and click Standardize this app. It detects the setup, resets
+to 1.0 / build 1 only if needed, writes the numbers everywhere they live, and adds the timestamped
+entry. Then commit. By hand:
+
+  Step 1 — find the files:
+    find . -name Info.plist -not -path "*/.build/*" -not -path "*/build/*" -not -path "*/DerivedData/*"
+    find . -name project.pbxproj -not -path "*/.build/*"
+
+  Step 2 — set the baseline in whichever exist:
+    Info.plist:
+      /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0" PLIST || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0" PLIST
+      /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" PLIST || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" PLIST
+    Xcode project:
+      sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = 1.0;/g" PBX
+      sed -i '' -E "s/CURRENT_PROJECT_VERSION = [0-9]+;/CURRENT_PROJECT_VERSION = 1;/g" PBX
+
+  Step 3 — if the project hardcodes a version constant in source, set it to 1.0 to match.
+  Step 4 — commit, for example: Standardize version and build to 1.0 and 1.
+
+ABOUT THE OLD PER-APP SCRIPTS (auto_increment_build.sh / bump_version.sh)
+Different apps shipped different scripts, and they disagreed:
+  - One bumped CURRENT_PROJECT_VERSION in the pbxproj across all targets (build only).
+  - Another bumped CFBundleVersion in the Info.plist via PlistBuddy (build only).
+  - bump_version.sh bumped MARKETING_VERSION and CURRENT_PROJECT_VERSION together as integers.
+The integer-version approach conflicts with this standard (VERSION is dotted, e.g. 1.0, and only
+its last component bumps for small changes; BUILD is the integer). Going forward, use BuildBuddy's
+buttons (or the commands above) instead of those scripts, so every app behaves identically. You can
+keep an auto_increment_build run-script phase in Xcode if you like per-compile build bumps, but the
+canonical, cross-app actions are the BuildBuddy buttons.
+
+KEEPING ALL APPS CONSISTENT
+- VERSION = CFBundleShortVersionString / MARKETING_VERSION. BUILD = CFBundleVersion /
+  CURRENT_PROJECT_VERSION. Update both locations when both exist.
+- Every app starts at 1.0 / build 1 after migration.
+- Big change bumps BUILD; small change bumps VERSION. Same rule everywhere.
+- Every change records a timestamped What's New entry (MM:DD:YY HH:MM).
+- When in doubt, read this document (it is the single source of truth) and follow it exactly.
+"""
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// MARK: - v1.9 New feature views
-// ════════════════════════════════════════════════════════════════════════════
+// The website deploy playbook — how a static site (e.g. sowensstudios.com) goes from a
+// GitHub repo to a live, auto-updating site on Netlify, and how BuildBuddy drives the updates.
+// Embedded so it travels with the app and can be exported. No new behavior — this documents
+// how to use BuildBuddy's existing apply/commit/push flow as your deploy button.
+enum DeployInstructions {
+    static let text: String = """
+BUILDBUDDY WEBSITE DEPLOY INSTRUCTIONS
+How to take a static website (plain HTML, CSS, JS — for example sowensstudios.com) from a
+GitHub repo to a live site on Netlify, and then update it forever from BuildBuddy with one
+Next click. Project-agnostic: wherever you see ANGLE BRACKETS (e.g. <site-repo> or <site-folder>),
+substitute the value for your site. Placeholders used throughout:
+   <site-folder>   the local folder holding the site files (must contain index.html at its root)
+   <site-repo>     the GitHub repository name for the site (e.g. sowensstudios-site)
+   <domain>        the custom domain (e.g. sowensstudios.com)
 
-// [New 3] Diff viewer — shows the unified diff of pending changes, colorized.
-struct DiffView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    @State private var diff = "Loading…"
+BIG PICTURE (READ FIRST)
+There are TWO systems and they connect once:
+   1. GitHub  — stores your site files and their history.
+   2. Netlify — watches the GitHub repo and, on every push, publishes the files to the live domain.
+Once wired together, the loop is: edit files -> BuildBuddy commits and pushes -> Netlify auto-builds ->
+<domain> updates in under a minute. After the one-time setup you never touch Netlify or GitHub by
+hand again — BuildBuddy is the deploy button.
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Pending changes — \(store.selected?.name ?? "")").font(.title3.bold())
-                Spacer()
-                Button("Reload") { Task { diff = await store.pendingDiff() } }
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }.padding(16)
-            Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, raw in
-                        let s = String(raw)
-                        Text(s.isEmpty ? " " : s)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(diffColor(s))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .background(diffBackground(s))
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(.vertical, 8)
-            }
-        }
-        .frame(width: 760, height: 620)
-        .task { diff = await store.pendingDiff() }
-    }
+WHY THIS WORKS WITH BUILDBUDDY AS-IS
+BuildBuddy already commits and pushes a local git repo (the same apply/commit/push flow it uses for
+code drops). A Netlify-connected site repo is just another git repo under <site-folder>. So deploying
+a website change is identical to any other BuildBuddy push: the only special part is the one-time
+GitHub + Netlify connection below. Nothing about commit safety, apply, or push behavior changes.
 
-    // Color additions green, removals red, hunk headers cyan, file headers bold/secondary.
-    private func diffColor(_ s: String) -> Color {
-        if s.hasPrefix("+") && !s.hasPrefix("+++") { return .green }
-        if s.hasPrefix("-") && !s.hasPrefix("---") { return .red }
-        if s.hasPrefix("@@") { return .cyan }
-        if s.hasPrefix("diff ") || s.hasPrefix("+++") || s.hasPrefix("---") || s.hasPrefix("index ") { return .secondary }
-        return .primary
-    }
-    private func diffBackground(_ s: String) -> Color {
-        if s.hasPrefix("+") && !s.hasPrefix("+++") { return Color.green.opacity(0.08) }
-        if s.hasPrefix("-") && !s.hasPrefix("---") { return Color.red.opacity(0.08) }
-        return Color.clear
-    }
-    private var colorNote: String { "Lines starting with + are additions, - are removals." }
-}
+===================================================================================
+PART 1 — ONE-TIME SETUP (do this once per site; all in the browser + BuildBuddy)
+===================================================================================
 
-// [New 4] Recent commit history.
-struct HistoryView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    @State private var rows: [Store.CommitRow] = []
+STEP 1. PUT THE SITE FILES IN A LOCAL FOLDER
+• Choose or create <site-folder> under a normal location BuildBuddy can reach (e.g. ~/Documents/<site-repo>).
+• The folder MUST contain index.html at its top level (not inside a subfolder). Supporting files
+  (an assets folder, css, images) sit alongside or under it, exactly as they should serve.
+• Example layout:
+     <site-folder>/
+        index.html
+        assets/
+           styles.css
+           favicon.svg
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Recent commits — \(store.selected?.name ?? "")").font(.title3.bold())
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }.padding(16)
-            Divider()
-            if rows.isEmpty {
-                Text("No commits found.").foregroundStyle(.secondary).padding()
-                Spacer()
-            } else {
-                List(rows) { c in
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(c.sha).font(.system(.caption, design: .monospaced)).foregroundStyle(.tint)
-                            .frame(width: 70, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(c.subject).font(.callout)
-                            Text("\(c.author) · \(c.date)").font(.caption2).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(c.sha, forType: .string)
-                        } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-                        .help("Copy SHA")
-                    }.padding(.vertical, 2)
-                }
-            }
-        }
-        .frame(width: 720, height: 560)
-        .task { rows = await store.recentCommits() }
-    }
-}
+STEP 2. CREATE THE GITHUB REPOSITORY
+Easiest path — let BuildBuddy do it:
+• Add <site-folder> as a project in BuildBuddy (drag the folder into the sidebar, or click +).
+• If the folder is not yet a git repo, BuildBuddy treats it as local-only. Use the Connect to GitHub
+  helper (it appears for repos with no remote) and follow the GitHub CLI path if gh is installed,
+  or the browser path: it opens github.com/new, you create an EMPTY repo named <site-repo>
+  (no README, no .gitignore, no license — empty), copy the repo URL, paste it back, and BuildBuddy
+  wires up the remote and does the first commit and push.
+Manual alternative (if you prefer):
+• At github.com/new create an empty repo <site-repo>. Then in BuildBuddy's Connect to GitHub sheet
+  paste the URL shown on the new repo page (the https://github.com/<you>/<site-repo>.git form).
+Result: your site files now live in GitHub with history, pushed from BuildBuddy.
 
-// [New 2] Multi-project dashboard — branch, dirty, ahead/behind for every project at a glance.
-struct DashboardView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
+STEP 3. CONNECT NETLIFY TO THE GITHUB REPO (turns pushes into deploys)
+This is the step that makes GitHub updates publish automatically. Do it in the browser once.
+• Go to app.netlify.com and sign in.
+• If a site for <domain> already exists (for example one created earlier by drag-and-drop), you will
+  RELINK it to Git rather than make a new one — see STEP 3B. For a brand-new site use STEP 3A.
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("All projects").font(.title2.bold())
-                Spacer()
-                Button("Refresh all") { Task { await store.refreshAll() } }
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }.padding(16)
-            Divider()
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(store.projects) { p in
-                        let snap = store.dashboard[p.id]
-                        HStack(spacing: 12) {
-                            Image(systemName: store.isFavorite(p) ? "star.fill" : "folder")
-                                .foregroundStyle(store.isFavorite(p) ? Color.yellow : Color.accentColor)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(p.name).fontWeight(.medium)
-                                Text(p.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            Spacer()
-                            if let s = snap {
-                                Text(s.branch).font(.caption.monospaced())
-                                    .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(.quaternary, in: Capsule())
-                                if s.ahead > 0 { Label("\(s.ahead)", systemImage: "arrow.up").font(.caption2).foregroundStyle(.green) }
-                                if s.behind > 0 { Label("\(s.behind)", systemImage: "arrow.down").font(.caption2).foregroundStyle(.orange) }
-                                Circle().fill(s.dirty ? Color.orange : Color.green).frame(width: 9, height: 9)
-                                    .help(s.dirty ? "Uncommitted changes" : "Clean")
-                            } else {
-                                ProgressView().scaleEffect(0.5)
-                            }
-                            Button { store.select(p); dismiss() } label: { Text("Open") }
-                                .buttonStyle(.bordered).controlSize(.small)
-                        }
-                        .padding(.horizontal, 16).padding(.vertical, 8)
-                        Divider()
-                    }
-                }
-            }
-        }
-        .frame(width: 720, height: 580)
-        .task { await store.refreshAll() }
-    }
-}
+STEP 3A. NEW SITE FROM GIT
+• Netlify dashboard -> Add new project (or Add new site) -> Import an existing project.
+• Choose GitHub and authorize Netlify. When asked, install the Netlify GitHub App and grant it access
+  to <site-repo> (you can limit it to just that repo).
+• Pick <site-repo> from the list.
+• Build settings: for a plain static site there is NO build command. Leave Build command EMPTY and set
+  Publish directory to the folder that contains index.html — usually "." (the repo root) if index.html
+  is at the top, or the subfolder name if you nested it. Then click Deploy.
+• Netlify builds and gives a temporary <name>.netlify.app URL. Confirm it looks right.
 
-// [New 5] Command palette — fuzzy-ish filterable list of actions, ⌘K.
-struct CommandPaletteView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    let onRun: (String) -> Void
-    @State private var query = ""
+STEP 3B. EXISTING DRAG-AND-DROP SITE — RELINK TO GIT
+If <domain> is already served by a manual (drag-and-drop) Netlify site and you want to keep that same
+site and its domain:
+• Open that site -> Project configuration (Site settings) -> Build and deploy -> Continuous deployment.
+• Under Repository choose Link repository (or Manage repository -> Link to a different repository),
+  choose GitHub, install/authorize the Netlify GitHub App for <site-repo>, and select it.
+• Set the same build settings as 3A: Build command EMPTY, Publish directory = the folder with index.html.
+• From now on this existing site (with its existing <domain> and SSL) deploys from GitHub pushes.
 
-    struct Cmd: Identifiable { let id: String; let label: String; let icon: String }
-    let commands: [Cmd] = [
-        .init(id: "pull", label: "Pull latest", icon: "arrow.down.circle"),
-        .init(id: "commit", label: "Commit & Push", icon: "arrow.up.circle"),
-        .init(id: "fetch", label: "Fetch", icon: "arrow.down.left.circle"),
-        .init(id: "diff", label: "View Diff", icon: "doc.text.magnifyingglass"),
-        .init(id: "history", label: "History", icon: "clock.arrow.circlepath"),
-        .init(id: "dashboard", label: "Dashboard", icon: "square.grid.2x2"),
-        .init(id: "stash", label: "Stash", icon: "tray.and.arrow.up"),
-        .init(id: "unstash", label: "Unstash", icon: "tray.and.arrow.down.fill"),
-        .init(id: "xcode", label: "Open in Xcode", icon: "hammer"),
-        .init(id: "github", label: "Open on GitHub", icon: "safari"),
-        .init(id: "copysha", label: "Copy current SHA", icon: "number"),
-        .init(id: "refreshall", label: "Refresh all projects", icon: "arrow.clockwise.circle"),
-        .init(id: "notes", label: "Project notes", icon: "note.text"),
-        .init(id: "commitall", label: "Commit all dirty repos", icon: "square.stack.3d.up"),
-        .init(id: "doctor", label: "Doctor", icon: "stethoscope"),
-        .init(id: "options", label: "Options", icon: "gearshape"),
-    ]
-    var filtered: [Cmd] {
-        query.isEmpty ? commands : commands.filter { $0.label.localizedCaseInsensitiveContains(query) }
-    }
+STEP 4. POINT / CONFIRM THE DOMAIN AND HTTPS (only if not already done)
+If <domain> already shows the site with a padlock, skip this. Otherwise:
+• In Netlify: Domain management -> Add a domain -> <domain> (add the www version too if offered).
+• Use Netlify DNS (simplest): Netlify lists 4 nameservers. At the domain registrar (e.g. Namecheap:
+  Domain List -> Manage -> Nameservers -> Custom DNS) paste all 4 and save.
+• HTTPS: Netlify auto-provisions a free Let's Encrypt certificate once DNS verification succeeds.
+  If it stays on "Waiting on DNS propagation," click Verify DNS configuration; when verified it shows
+  "DNS verification was successful" and the certificate is issued automatically (minutes, up to a few
+  hours). Turn on Force HTTPS when the certificate is active.
+• The scary "This Connection Is Not Private" page during this window is normal — it means DNS is
+  reaching Netlify but the certificate has not finished. It clears itself once the certificate issues.
 
-    var body: some View {
-        VStack(spacing: 0) {
-            TextField("Type a command…", text: $query)
-                .textFieldStyle(.plain).font(.title3)
-                .padding(14)
-            Divider()
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(filtered) { c in
-                        Button {
-                            dismiss(); onRun(c.id)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: c.icon).foregroundStyle(.tint).frame(width: 22)
-                                Text(c.label)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 9)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-        .frame(width: 480, height: 420)
-    }
-}
+ONE-TIME SETUP IS NOW COMPLETE. The rest of your life with this site is Part 2.
 
-// [New 7] Per-project notes.
-struct NotesView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    @State private var text = ""
+===================================================================================
+PART 2 — UPDATING THE SITE (the everyday flow — BuildBuddy is the deploy button)
+===================================================================================
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Notes — \(store.selected?.name ?? "")").font(.title3.bold())
-                Spacer()
-                Button("Save") { if let p = store.selected { store.setNote(text, for: p) }; dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                Button("Close") { dismiss() }
-            }.padding(16)
-            Divider()
-            TextEditor(text: $text)
-                .font(.system(.body, design: .monospaced))
-                .padding(8)
-        }
-        .frame(width: 560, height: 460)
-        .onAppear { if let p = store.selected { text = store.note(for: p) } }
-    }
-}
+THE LOOP
+1. Edit the files in <site-folder> (change text in index.html, tweak assets/styles.css, add an image).
+   Keep everything inside <site-folder> — that folder IS the site.
+2. In BuildBuddy, select the <site-repo> project.
+3. BuildBuddy shows the repo as dirty (uncommitted changes). Click Next:
+      • If you dropped a delivery zip, Next applies it first, then commits and pushes.
+      • Otherwise Next commits your edits and pushes to GitHub.
+   You can edit the commit message inline first; keep it plain prose (see the Commit-Message Rule in the
+   Delivery format document — same rule applies here).
+4. The push reaches GitHub. Netlify sees the push, auto-builds, and publishes.
+5. Within about a minute, <domain> shows the update. Hard-refresh the browser
+   (Command-Shift-R) if you still see the old version — that is browser cache, not a failed deploy.
 
-// [New 8] Commit all dirty repos with one message.
-struct CommitAllView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
-    @State private var msg = ""
-    private var problems: [String] { CommitSafety.problems(in: msg) }
+THAT IS THE ENTIRE UPDATE PROCESS. No dragging folders, no visiting Netlify, no touching the registrar.
+Edit -> Next -> done.
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Commit all dirty repositories").font(.title3.bold())
-            Text("Applies the same commit message to every project that has uncommitted changes, then pushes each.")
-                .font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $msg).frame(height: 90)
-                .font(.system(.body, design: .monospaced))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(problems.isEmpty ? Color.secondary.opacity(0.3) : .red))
-            if !problems.isEmpty {
-                ForEach(problems, id: \.self) { Text("• \($0)").font(.caption2).foregroundStyle(.red) }
-            }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Commit all") { let m = msg; dismiss(); Task { await store.commitAllDirty(message: m) } }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(msg.trimmingCharacters(in: .whitespaces).isEmpty || !problems.isEmpty)
-            }
-        }
-        .padding(20).frame(width: 480)
-    }
-}
+DELIVERING SITE CHANGES AS A DROP (optional, same as code drops)
+If a change is prepared as a BuildBuddy drop (the v2 zip layout from the Delivery format document),
+the top folder's name is <site-repo> and the files inside use repo-root-relative paths
+(e.g. index.html at the top, assets/styles.css under it). Applying the drop overlays the files onto
+<site-folder>; then Next commits and pushes exactly as above. COMMIT_MSG.txt and commit.sh are handled
+the same way they are for code.
 
-// [v1.10] Apply history / undo log — every delivery applied, with one-click restore-from-backup.
-struct ApplyHistoryView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
+===================================================================================
+PART 3 — VERIFYING A DEPLOY AND FIXING COMMON PROBLEMS
+===================================================================================
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Apply history").font(.title2.bold())
-                Spacer()
-                Button("Clear") { store.clearHistory() }.disabled(store.history.isEmpty)
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }.padding(16)
-            Divider()
-            if store.history.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "clock.badge.questionmark").font(.system(size: 40)).foregroundStyle(.secondary)
-                    Text("No deliveries applied yet.").foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        // Newest first.
-                        ForEach(store.history.reversed()) { rec in
-                            HStack(alignment: .top, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 8) {
-                                        Text(rec.projectName).fontWeight(.semibold)
-                                        if let sha = rec.commitSHA {
-                                            Text(sha.prefix(8)).font(.caption.monospaced()).foregroundStyle(.tint)
-                                        }
-                                        Text(rec.date, style: .date).font(.caption2).foregroundStyle(.secondary)
-                                        Text(rec.date, style: .time).font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text("\(rec.fileCount) file\(rec.fileCount == 1 ? "" : "s")\(rec.zipName.map { " · \($0)" } ?? "")")
-                                        .font(.caption2).foregroundStyle(.secondary)
-                                    Text(rec.commitMessage.split(separator: "\n").first.map(String.init) ?? "")
-                                        .font(.caption).lineLimit(1)
-                                }
-                                Spacer()
-                                if rec.backupDir != nil {
-                                    Button("Undo") { Task { await store.undoApply(rec) } }
-                                        .buttonStyle(.bordered).controlSize(.small)
-                                        .help("Restore the files this delivery overwrote, from the backup taken at apply time")
-                                } else {
-                                    Text("no backup").font(.caption2).foregroundStyle(.tertiary)
-                                }
-                            }
-                            .padding(.horizontal, 16).padding(.vertical, 9)
-                            Divider()
-                        }
-                    }
-                }
-            }
-        }
-        .frame(width: 720, height: 560)
-    }
-}
+HOW TO CONFIRM A DEPLOY LANDED
+• GitHub: the repo's commit list shows your new commit at the top.
+• Netlify: the site's Deploys page shows a new deploy going Building -> Published. A green Published with
+  your commit message means it is live.
+• Browser: open <domain> in a fresh/private window; hard-refresh if needed.
 
-// [v1.10] Multi-zip queue — review queued deliveries and apply them in sequence.
-struct QueueView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: Store
+TROUBLESHOOTING
+• Push succeeded but the site did not change:
+   - Check Netlify's Deploys page. If no new deploy appeared, the repo link or webhook may be off:
+     Site settings -> Build and deploy -> Continuous deployment -> confirm the branch you pushed matches
+     the site's production branch, and that the Netlify GitHub App still has access to <site-repo>.
+• Site deployed but looks unstyled (plain text, no colors/images):
+   - The Publish directory is wrong, or assets are not where index.html expects. Ensure Publish directory
+     points at the folder that actually contains index.html, and that asset paths (like assets/styles.css)
+     resolve relative to it. Keep the folder structure intact when editing.
+• Deploy failed on Netlify:
+   - For a static site there should be NO build command. If Netlify is trying to run one, clear the
+     Build command field (leave it empty) and set Publish directory correctly, then Retry deploy.
+• "Not secure" / certificate warning:
+   - The Let's Encrypt certificate has not finished. In Domain management -> HTTPS click Verify DNS
+     configuration; wait for it to provision, then enable Force HTTPS. Test in a private window.
+• BuildBuddy could not push:
+   - This is an ordinary git push problem, handled by BuildBuddy's normal push recovery. Retry Next;
+     if it persists, open the console to read the exact git error.
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Delivery queue").font(.title2.bold())
-                Spacer()
-                Button("Add zips…") { pickZips() }
-                Button("Clear") { store.clearQueue() }.disabled(store.zipQueue.isEmpty)
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
-            }.padding(16)
-            Divider()
-            if store.zipQueue.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray").font(.system(size: 40)).foregroundStyle(.secondary)
-                    Text("Queue is empty. Add delivery zips, or drop several on the console at once.")
-                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity).padding()
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(Array(store.zipQueue.enumerated()), id: \.offset) { idx, url in
-                            HStack(spacing: 10) {
-                                Text("\(idx + 1)").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 24)
-                                Image(systemName: "doc.zipper").foregroundStyle(.tint)
-                                Text(url.lastPathComponent).lineLimit(1)
-                                Spacer()
-                                Button { store.zipQueue.remove(at: idx) } label: { Image(systemName: "xmark.circle.fill") }
-                                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                            Divider()
-                        }
-                    }
-                }
-            }
-            Divider()
-            HStack {
-                Text("Applies to: \(store.selected?.name ?? "no project selected")")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if store.processingQueue { ProgressView().scaleEffect(0.6) }
-                Button("Apply all in order") {
-                    dismiss(); Task { await store.processZipQueue() }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(store.zipQueue.isEmpty || store.selected == nil || store.processingQueue)
-            }
-            .padding(16)
-        }
-        .frame(width: 640, height: 520)
-    }
+===================================================================================
+QUICK CHECKLISTS
+===================================================================================
 
-    private func pickZips() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.zip]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        if panel.runModal() == .OK { store.enqueueZips(panel.urls) }
-    }
-}
+ONE-TIME SETUP CHECKLIST
+[ ] <site-folder> exists locally with index.html at its top level
+[ ] <site-folder> added as a BuildBuddy project and pushed to GitHub as <site-repo>
+[ ] Netlify linked to <site-repo> (new site, or existing site relinked to Git)
+[ ] Build command EMPTY; Publish directory points at the folder containing index.html
+[ ] <domain> connected in Netlify and DNS verified
+[ ] HTTPS certificate active and Force HTTPS on
+[ ] Test: <domain> loads over https with a padlock
 
-// [v1.10 UI] Drag handle to resize the console pane. Dragging up grows it, down shrinks it.
-struct ConsoleResizeHandle: View {
-    @Binding var height: Double
-    @State private var startHeight: Double? = nil
+EVERYDAY UPDATE CHECKLIST
+[ ] Edited files inside <site-folder> (structure kept intact)
+[ ] Selected the <site-repo> project in BuildBuddy
+[ ] Commit message is plain prose (passes the safety check)
+[ ] Clicked Next (apply if needed, then commit and push)
+[ ] Netlify Deploys shows Published
+[ ] <domain> shows the change after a hard-refresh
 
-    var body: some View {
-        ZStack {
-            Rectangle().fill(Color.secondary.opacity(0.001)).frame(height: 10)
-            RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.35))
-                .frame(width: 40, height: 4)
-        }
-        .contentShape(Rectangle())
-        .onHover { inside in
-            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
-        }
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    if startHeight == nil { startHeight = height }
-                    // Dragging up (negative translation) increases height.
-                    height = (startHeight ?? height) - value.translation.height
-                }
-                .onEnded { _ in startHeight = nil }
-        )
-    }
-}
-
-// [v1.10 UI] Toast overlay — brief auto-dismissing banners, stacked at the bottom.
-struct ToastOverlay: View {
-    @EnvironmentObject var store: Store
-    var body: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            ForEach(store.toasts) { t in
-                HStack(spacing: 8) {
-                    Image(systemName: icon(t.kind)).foregroundStyle(color(t.kind))
-                    Text(t.text).font(.callout)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(.regularMaterial, in: Capsule())
-                .overlay(Capsule().stroke(color(t.kind).opacity(0.4)))
-                .shadow(radius: 6, y: 2)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .padding(.bottom, 18)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.toasts.count)
-        .allowsHitTesting(false)
-    }
-    private func icon(_ k: Store.Toast.Kind) -> String {
-        switch k { case .success: return "checkmark.circle.fill"; case .error: return "exclamationmark.triangle.fill"; case .info: return "info.circle.fill" }
-    }
-    private func color(_ k: Store.Toast.Kind) -> Color {
-        switch k { case .success: return .green; case .error: return .red; case .info: return .blue }
-    }
-}
-
-
-
-// Mirrors the agent's remote-config.json. Persisted to UserDefaults + written to
-// disk so the running agent (or next launch) picks it up.
-struct RemoteConfig: Codable, Equatable {
-    var port: Int = 7842
-    var enableLAN: Bool = true
-    var enableTailscale: Bool = true
-    var enablePublic: Bool = false
-    var allowPublic: Bool = false
-    var enableRelay: Bool = false
-    var relayRepo: String = ""
-    var relayPollSeconds: Int = 10
-    var smbWatchDir: String = ""
-    var smbProjectName: String = ""
-    var smbApplySeconds: Int = 6
-}
-
-// What the agent writes to remote-state.json while running.
-struct RemoteState: Codable {
-    struct Addr: Codable, Hashable { let mode: String; let host: String }
-    var version: String = ""
-    var running: Bool = false
-    var port: Int = 7842
-    var token: String = ""
-    var addresses: [Addr] = []
-    var projects: [String] = []
-    var relay: Bool = false
-    var smbWatch: String = ""
-    var public_: Bool = false
-    enum CodingKeys: String, CodingKey {
-        case version, running, port, token, addresses, projects, relay, smbWatch
-        case public_ = "public"
-    }
-}
-
-@MainActor
-final class RemoteAgent: ObservableObject {
-    static let shared = RemoteAgent()
-
-    @Published var config: RemoteConfig { didSet { persistAndPush() } }
-    @Published var state: RemoteState = RemoteState()
-    @Published var isRunning = false
-    @Published var lastError = ""
-
-    private var process: Process?
-    private var pollTimer: Timer?
-
-    // Paths shared with the agent.
-    private var supportDir: URL {
-        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BuildBuddy", isDirectory: true)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        return d
-    }
-    private var configURL: URL { supportDir.appendingPathComponent("remote-config.json") }
-    private var stateURL:  URL { supportDir.appendingPathComponent("remote-state.json") }
-    private var tokenURL:  URL { supportDir.appendingPathComponent("remote-token.txt") }
-
-    // The agent script ships next to the app. We resolve it from a few known spots.
-    private var agentScriptURL: URL? {
-        let fm = FileManager.default
-        var candidates: [URL] = []
-        if let res = Bundle.main.resourceURL { candidates.append(res.appendingPathComponent("buddyd.py")) }
-        // Next to the .app bundle (typical for this unsigned, folder-shipped app).
-        let appDir = Bundle.main.bundleURL.deletingLastPathComponent()
-        candidates.append(appDir.appendingPathComponent("agent/buddyd.py"))
-        candidates.append(appDir.appendingPathComponent("buddyd.py"))
-        // Saved copy in Application Support (we stage one there on first start).
-        candidates.append(supportDir.appendingPathComponent("buddyd.py"))
-        return candidates.first { fm.fileExists(atPath: $0.path) }
-    }
-
-    var startOnLaunch: Bool {
-        get { UserDefaults.standard.bool(forKey: "remoteStartOnLaunch") }
-        set { UserDefaults.standard.set(newValue, forKey: "remoteStartOnLaunch") }
-    }
-
-    var token: String { (try? String(contentsOf: tokenURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? state.token }
-
-    private init() {
-        if let data = try? Data(contentsOf: UserDefaults.standard.url(forKey: "remoteConfigURL") ?? URL(fileURLWithPath: "/dev/null")),
-           let c = try? JSONDecoder().decode(RemoteConfig.self, from: data) {
-            config = c
-        } else if let raw = UserDefaults.standard.data(forKey: "remoteConfigBlob"),
-                  let c = try? JSONDecoder().decode(RemoteConfig.self, from: raw) {
-            config = c
-        } else {
-            config = RemoteConfig()
-        }
-        writeConfigFile()
-        startPolling()
-    }
-
-    private func persistAndPush() {
-        if let raw = try? JSONEncoder().encode(config) {
-            UserDefaults.standard.set(raw, forKey: "remoteConfigBlob")
-        }
-        writeConfigFile()
-        // The agent re-reads config on its heartbeat; nothing else needed.
-    }
-
-    private func writeConfigFile() {
-        if let raw = try? JSONEncoder().encode(config) { try? raw.write(to: configURL) }
-    }
-
-    // Stage a copy of the agent script into Application Support so it survives
-    // even if the app folder layout changes, and so we always have a path.
-    private func stageScriptIfNeeded() -> URL? {
-        guard let src = agentScriptURL else { return nil }
-        let dst = supportDir.appendingPathComponent("buddyd.py")
-        if src != dst {
-            try? FileManager.default.removeItem(at: dst)
-            try? FileManager.default.copyItem(at: src, to: dst)
-        }
-        return FileManager.default.fileExists(atPath: dst.path) ? dst : src
-    }
-
-    func start() {
-        guard process == nil else { return }
-        guard let script = stageScriptIfNeeded() else {
-            lastError = "Couldn't find buddyd.py next to the app. Keep the agent folder beside BuildBuddy."
-            return
-        }
-        writeConfigFile()
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        var args = ["python3", script.path, "--embedded"]
-        if config.allowPublic && config.enablePublic { args.append("--allow-public") }
-        p.arguments = args
-        p.standardInput = FileHandle.nullDevice
-        // Drain output so the pipe never fills; we surface errors via lastError.
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { h in
-            let d = h.availableData
-            if let s = String(data: d, encoding: .utf8), s.lowercased().contains("error") {
-                Task { @MainActor in self.lastError = s.trimmingCharacters(in: .whitespacesAndNewlines) }
-            }
-        }
-        p.terminationHandler = { _ in
-            Task { @MainActor in
-                self.process = nil
-                self.isRunning = false
-            }
-        }
-        do {
-            try p.run()
-            process = p
-            isRunning = true
-            lastError = ""
-        } catch {
-            lastError = "Couldn't start agent: \(error.localizedDescription). Is Python 3 installed? (xcode-select --install)"
-        }
-    }
-
-    func stop() {
-        guard let p = process else { isRunning = false; return }
-        p.terminate()
-        let pid = p.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { kill(-pid, SIGKILL) }
-        process = nil
-        isRunning = false
-        // Clear the running flag in the state file immediately.
-        if var s = readState() { s.running = false; if let raw = try? JSONEncoder().encode(s) { try? raw.write(to: stateURL) } }
-    }
-
-    func toggle() { isRunning ? stop() : start() }
-
-    func rotateToken() {
-        // Remove the token file; agent regenerates on next start.
-        let wasRunning = isRunning
-        stop()
-        try? FileManager.default.removeItem(at: tokenURL)
-        if wasRunning { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.start() } }
-    }
-
-    private func readState() -> RemoteState? {
-        guard let data = try? Data(contentsOf: stateURL) else { return nil }
-        return try? JSONDecoder().decode(RemoteState.self, from: data)
-    }
-
-    private func startPolling() {
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                if let s = self.readState() {
-                    self.state = s
-                    // Trust the process handle for liveness; state file confirms address info.
-                    if self.process == nil { self.isRunning = s.running && (Date().timeIntervalSince1970 - 0) > 0 ? false : self.isRunning }
-                }
-            }
-        }
-    }
-
-    // The URL a phone uses for a given address, including the token (so the QR is one-scan).
-    func pairURL(for addr: RemoteState.Addr) -> String {
-        "buddyremote://pair?host=\(addr.host)&token=\(token)"
-    }
-    func plainHostLine(for addr: RemoteState.Addr) -> String { addr.host }
-}
-
-// Compact header badge: a tappable LED + label showing agent status.
-struct RemoteHeaderBadge: View {
-    @EnvironmentObject var store: Store
-    @ObservedObject var agent = RemoteAgent.shared
-    var body: some View {
-        Button { NotificationCenter.default.post(name: .bbShowRemote, object: nil) } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(agent.isRunning ? Color.green : Color.secondary.opacity(0.5))
-                    .frame(width: 8, height: 8)
-                    .shadow(color: agent.isRunning ? .green.opacity(0.7) : .clear, radius: 4)
-                Image(systemName: "iphone.radiowaves.left.and.right").font(.caption)
-                Text(agent.isRunning ? "Remote on" : "Remote off").font(.caption)
-            }
-            .padding(.horizontal, 9).padding(.vertical, 5)
-            .background(.quaternary, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(agent.isRunning ? "iPhone remote is reachable — click to manage" : "Start the iPhone remote")
-    }
-}
-
-// The full Remote control panel (a sheet).
-struct RemotePanelView: View {
-    @EnvironmentObject var store: Store
-    @ObservedObject var agent = RemoteAgent.shared
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Label("iPhone Remote", systemImage: "iphone.radiowaves.left.and.right").font(.title2.bold())
-                Spacer()
-                Toggle(isOn: Binding(get: { agent.isRunning }, set: { _ in agent.toggle() })) {
-                    Text(agent.isRunning ? "On" : "Off")
-                }.toggleStyle(.switch)
-            }
-            .padding(16)
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if !agent.lastError.isEmpty {
-                        Text(agent.lastError).font(.caption).foregroundStyle(.red)
-                            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    // ── Pairing ──────────────────────────────────────────────
-                    GroupBox("Pair a phone") {
-                        if agent.isRunning && !agent.state.addresses.isEmpty {
-                            HStack(alignment: .top, spacing: 16) {
-                                QRView(string: agent.pairURL(for: agent.state.addresses[0]))
-                                    .frame(width: 150, height: 150)
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Scan in the Camera app, or enter manually:").font(.caption).foregroundStyle(.secondary)
-                                    ForEach(agent.state.addresses, id: \.self) { a in
-                                        HStack {
-                                            Text(a.mode).font(.caption.bold()).frame(width: 78, alignment: .leading)
-                                            Text(a.host).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                                        }
-                                    }
-                                    HStack {
-                                        Text("Token").font(.caption.bold()).frame(width: 78, alignment: .leading)
-                                        Text(agent.token).font(.system(.caption, design: .monospaced)).textSelection(.enabled).lineLimit(1)
-                                    }
-                                    Button("Rotate token") { agent.rotateToken() }.font(.caption)
-                                }
-                            }
-                        } else if agent.isRunning {
-                            Text("Starting… looking up addresses.").font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("Turn the remote On to show pairing details.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-
-                    // ── Reach modes ─────────────────────────────────────────
-                    GroupBox("How the phone reaches this Mac") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Toggle("Same Wi-Fi (LAN)", isOn: $agent.config.enableLAN)
-                            Toggle("Tailscale (from anywhere, no open ports)", isOn: $agent.config.enableTailscale)
-                            HStack {
-                                Text("Tailscale status:").font(.caption).foregroundStyle(.secondary)
-                                Text(agent.state.addresses.contains { $0.mode == "Tailscale" } ? "connected ✓" : "not detected")
-                                    .font(.caption)
-                            }
-                            Divider()
-                            Toggle("Public (router port-forward) — advanced", isOn: $agent.config.enablePublic)
-                            if agent.config.enablePublic {
-                                Toggle("I understand the risk; allow public binding", isOn: $agent.config.allowPublic)
-                                    .font(.caption)
-                                Text("A leaked token becomes remote code execution on this Mac. Forward TCP \(agent.config.port) only while needed; rotate the token after. Restart the remote to apply.")
-                                    .font(.caption2).foregroundStyle(.orange)
-                            }
-                            Divider()
-                            Toggle("Relay via a private GitHub repo (no inbound)", isOn: $agent.config.enableRelay)
-                            if agent.config.enableRelay {
-                                HStack {
-                                    Text("Repo").font(.caption).frame(width: 50, alignment: .leading)
-                                    TextField("owner/name", text: $agent.config.relayRepo).font(.caption)
-                                }
-                                Text("Triggers predefined jobs only. See shortcut/RELAY_SETUP.md. Restart to apply.")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }.padding(6)
-                    }
-
-                    // ── SMB drop-folder ─────────────────────────────────────
-                    GroupBox("SMB drop-folder (apply a delivery from the phone)") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                TextField("/Users/you/Shared/BuildBuddyDrop", text: $agent.config.smbWatchDir).font(.caption)
-                                Button("Choose…") { pickWatchDir() }.font(.caption)
-                            }
-                            HStack {
-                                Text("Apply to project").font(.caption).frame(width: 110, alignment: .leading)
-                                TextField("(blank = first project)", text: $agent.config.smbProjectName).font(.caption)
-                            }
-                            Text("Share this folder over SMB (System Settings → General → Sharing → File Sharing). Drop a delivery .zip into it from the iPhone Files app; BuildBuddy applies it the same way the Apply button does, then writes a result file beside it. Restart the remote to apply changes.")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }.padding(6)
-                    }
-
-                    Toggle("Start the remote automatically when BuildBuddy launches", isOn: Binding(
-                        get: { agent.startOnLaunch }, set: { agent.startOnLaunch = $0 }))
-                        .font(.caption)
-
-                    Text("Changes to reach modes, relay, and SMB take effect after you toggle the remote Off then On.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                .padding(16)
-            }
-
-            Divider()
-            HStack {
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-                Spacer()
-                if agent.isRunning {
-                    Button("Restart remote") { agent.stop(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { agent.start() } }
-                }
-            }.padding(12)
-        }
-    }
-
-    private func pickWatchDir() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose the SMB drop-folder"
-        panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { agent.config.smbWatchDir = url.path }
-    }
-}
-
-// Minimal QR generator using CoreImage (no extra dependencies).
-import CoreImage
-import CoreImage.CIFilterBuiltins
-struct QRView: View {
-    let string: String
-    var body: some View {
-        if let img = Self.qr(string) {
-            Image(nsImage: img).interpolation(.none).resizable().scaledToFit()
-                .background(Color.white).cornerRadius(6)
-        } else {
-            RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.2))
-                .overlay(Text("QR").foregroundStyle(.secondary))
-        }
-    }
-    static func qr(_ s: String) -> NSImage? {
-        let ctx = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(s.utf8)
-        filter.correctionLevel = "M"
-        guard let out = filter.outputImage else { return nil }
-        let scaled = out.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
-        guard let cg = ctx.createCGImage(scaled, from: scaled.extent) else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
-    }
+NOTES
+• Your local <site-folder> is the master copy. Keep it safe; it is what you edit and what BuildBuddy pushes.
+• You can point BuildBuddy at multiple site repos the same way — each is just another project.
+• This document describes using BuildBuddy's existing flow; it introduces no new commit or push behavior.
+"""
 }
