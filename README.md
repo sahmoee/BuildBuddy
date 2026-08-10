@@ -1,28 +1,39 @@
 # BuildBuddy
 
-BuildBuddy is a focused, local-first macOS workspace for managing Git repositories, Xcode builds, code deliveries, versions, and deployments.
+A focused, local-first macOS workspace for managing Git repositories, Xcode builds,
+code deliveries, versions, and deployments. Distributed as a single Swift source file
+with lightweight launcher scripts — no account, no developer-controlled data service.
 
-## Highlights
+## Features
 
-- Inspect repository status, branches, history, and diffs.
-- Commit, pull, push, and connect local projects to GitHub.
-- Run Xcode builds and common project checks.
-- Preview and apply structured code deliveries with recovery history.
-- Manage app version and build numbers consistently.
-- Keep work local when a repository has no remote.
+- Inspect repository status, branches, history, and diffs
+- Commit, pull, push, and connect local projects to GitHub
+- Run Xcode builds and common project checks
+- Preview and apply structured code deliveries with recovery history and undo
+- Manage app version and build numbers consistently
+- Works fully locally when a repository has no remote
 
-BuildBuddy is distributed as a single Swift source file with lightweight launcher and builder scripts. It does not require an account and does not operate a developer-controlled data service.
+## Requirements
 
-## Build and run
+- macOS
+- Xcode Command Line Tools
 
-Double-click `Launch BuildBuddy.command` for a development build, or `Build BuildBuddy.app.command` to create a standalone local app bundle. Xcode Command Line Tools are required.
+## Getting started
 
-## Privacy, support, and licensing
+```bash
+git clone https://github.com/sahmoee/BuildBuddy.git
+cd BuildBuddy
+```
 
-- [Privacy policy](PRIVACY.md)
-- [Support](SUPPORT.md)
-- [License](LICENSE.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md)
-- [App Store metadata](APP_STORE_METADATA.md)
+Double-click **`Launch BuildBuddy.command`** for a development build, or
+**`Build BuildBuddy.app.command`** to produce a standalone local `.app` bundle.
 
-The publishable support site lives in [`docs/`](docs/).
+## Project structure
+
+- `BuildBuddy.swift` — the entire application
+- `*.command` — launcher and builder scripts
+
+## License
+
+See [LICENSE.md](LICENSE.md). Privacy in [PRIVACY.md](PRIVACY.md); third-party notices
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

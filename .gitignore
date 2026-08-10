@@ -24,3 +24,6 @@ GoogleService-Info.plist
 __MACOSX/
 *.swp
 .vscode/
+
+# Local operating guide — not part of the shipped repo
+README-FIRST.md
